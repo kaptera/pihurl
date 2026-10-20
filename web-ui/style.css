@@ -172,6 +172,7 @@ textarea.inp{resize:vertical;line-height:1.6}
 
 /* SPEC */
 .g2{display:grid;grid-template-columns:320px 1fr;gap:18px;align-items:start}
+.g2>*,.g3>*,.g4>*{min-width:0}
 .drop{border:1.5px dashed var(--line2);border-radius:14px;padding:26px 16px;text-align:center;transition:.2s;cursor:pointer;background:repeating-linear-gradient(45deg,transparent 0 10px,rgba(255,255,255,.012) 10px 20px)}
 .drop:hover,.drop.over{border-color:var(--acc);background:var(--acc-soft)}
 .drop svg{font-size:28px;color:var(--acc);margin-bottom:6px}

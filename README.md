@@ -6,6 +6,11 @@ for tests. The agent writes [Hurl](https://hurl.dev) files, runs them and fixes 
 runs the tests**, so results are reproducible and do not depend on the model's mood. Everything
 happens in the browser, in one Docker image.
 
+![pihurl: the agent finds a spec and writes tests, pihurl runs them](docs/images/demo.gif)
+
+*A local model is asked to test [httpbin](https://httpbin.org): it finds the published OpenAPI spec,
+writes eight Hurl files, and pihurl runs them (8/8 files, 39 requests). Waiting time is cut.*
+
 - **Chat with an agent** that can read your spec, write and edit test files and run commands. It is
   [pi](https://github.com/earendil-works/pi), run in RPC mode inside the container.
 - **Specs**: upload OpenAPI 3 / Swagger 2 files, or ask the agent to create one from an API's docs
@@ -20,6 +25,16 @@ happens in the browser, in one Docker image.
   OpenRouter.
 - **Chats persist** across reloads, restarts and provider changes; there is an application log for
   checking what the agent did.
+
+## Screenshots
+
+| Chat with tool calls and a Markdown answer | The spec the agent found |
+|---|---|
+| ![Chat](docs/images/chat.png) | ![Spec](docs/images/spec.png) |
+
+| Tests grouped by spec, run results | One test file's requests and assertions |
+|---|---|
+| ![Tests](docs/images/tests.png) | ![Report](docs/images/report.png) |
 
 ## Quick start
 
