@@ -50,7 +50,7 @@ jobs:
           cache-dependency-path: e2e/package-lock.json
       - uses: docker/setup-buildx-action@v4
       - name: Build the image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -92,7 +92,7 @@ jobs:
 
       # Build for this runner, start it and check it works, on every push and pull request.
       - name: Build (smoke test image)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -122,7 +122,7 @@ jobs:
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
       - name: Push
         if: env.PUBLISH == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
