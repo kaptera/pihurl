@@ -138,6 +138,10 @@ npm test                            # backend tests
 node --test ../web-ui/*.test.js     # UI tests (Markdown renderer, test grouping)
 ```
 
+Browser tests drive the built image with a scripted model and a tiny target API, so they need neither an LLM
+nor the internet: `docker build -t pihurl . && e2e/run.sh pihurl` (Docker and Node; the first run downloads
+Chromium).
+
 Hurl must be on `PATH` when running outside Docker. The web UI is plain files in `web-ui/` and has no
 build step. See [`server/README.md`](server/README.md) for the details.
 
@@ -145,7 +149,10 @@ build step. See [`server/README.md`](server/README.md) for the details.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request: type check, backend and
 UI tests, then it builds the Docker image, starts it and checks that it answers and ships Hurl
-(`scripts/docker-smoke.sh`, which you can also run locally against your own build).
+(`scripts/docker-smoke.sh`, which you can also run locally against your own build). A separate job runs the
+browser tests (`e2e/`, Playwright) against the image: sign-in, a chat in which a scripted model writes and
+runs a test, specs written by the agent, test groups, settings, and a probe of what the agent can and cannot
+see.
 
 **Publishing to Docker Hub** is on as soon as the repository has an Actions *variable*
 `DOCKERHUB_USERNAME` and an Actions *secret* `DOCKERHUB_TOKEN` (a Docker Hub access token with

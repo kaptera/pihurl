@@ -12,7 +12,7 @@ third-party software. Each keeps its own license.
 | [Node.js](https://nodejs.org) | runtime in the image | MIT |
 | Debian packages (`bash`, `git`, `ripgrep`, `curl`, …) | base image and agent tooling | their respective licenses |
 
-Development only: TypeScript (Apache-2.0), tsx (MIT).
+Development only: TypeScript (Apache-2.0), tsx (MIT), Playwright (Apache-2.0, for the browser tests).
 
 The transitive npm dependencies are listed with their licenses in `server/package-lock.json`;
 at the time of writing they are all permissive (MIT, Apache-2.0, BSD-3-Clause, ISC, BlueOak-1.0.0,

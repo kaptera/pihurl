@@ -1,0 +1,14 @@
+{
+	"name": "pihurl-e2e",
+	"private": true,
+	"description": "Browser tests for the pihurl image, with a scripted model and a small target API.",
+	"license": "MIT",
+	"scripts": {
+		"test": "playwright test",
+		"mocks": "node fixtures/mock-servers.mjs",
+		"run": "./run.sh"
+	},
+	"devDependencies": {
+		"@playwright/test": "^1"
+	}
+}
