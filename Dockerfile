@@ -3,7 +3,7 @@
 #
 # Build:  docker build -t pihurl .
 # Run:    docker run -p 3000:3000 -v $PWD/work:/workspace pihurl
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 ARG TARGETARCH
 ENV HURL_VERSION=8.0.1
 RUN apt-get update \
