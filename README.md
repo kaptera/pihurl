@@ -117,6 +117,31 @@ node --test ../web-ui/*.test.js     # UI tests (Markdown renderer, test grouping
 Hurl must be on `PATH` when running outside Docker. The web UI is plain files in `web-ui/` and has no
 build step. See [`server/README.md`](server/README.md) for the details.
 
+## CI and releases
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request: type check, backend and
+UI tests, then it builds the Docker image, starts it and checks that it answers and ships Hurl
+(`scripts/docker-smoke.sh`, which you can also run locally against your own build).
+
+**Publishing to Docker Hub** is on as soon as the repository has an Actions *variable*
+`DOCKERHUB_USERNAME` and an Actions *secret* `DOCKERHUB_TOKEN` (a Docker Hub access token with
+read/write scope). Without the variable, forks included, the publish steps are skipped.
+
+| Event | Tags pushed to `<user>/pihurl` |
+|---|---|
+| push to `main` | `edge`, `sha-<short>` |
+| tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest`, `sha-<short>` (no bare `0` tag for `v0.x`) |
+
+Images are built for `linux/amd64` and `linux/arm64`. The official image is
+[`0allitter0/pihurl`](https://hub.docker.com/r/0allitter0/pihurl); to use a published image:
+
+```bash
+docker run -d --name pihurl -p 127.0.0.1:3000:3000 -v "$PWD/work:/workspace" \
+  --add-host=host.docker.internal:host-gateway 0allitter0/pihurl:latest
+```
+
+Dependabot keeps the GitHub Actions, the npm packages of `server/` and the base image up to date.
+
 ## License
 
 [MIT](LICENSE). Third-party components and their licenses are listed in
