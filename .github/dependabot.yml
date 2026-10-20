@@ -11,7 +11,18 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # Types must match the Node version in the image (22); newer majors describe APIs it lacks.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # A new TypeScript major needs a deliberate migration, not an automatic bump.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Move the base image to a new Node major on purpose (it must stay in step with engines).
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]

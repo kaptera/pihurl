@@ -41,9 +41,8 @@ With Docker Compose, use the `docker-compose.yaml` from the repository.
 
 | Tag | Meaning |
 |---|---|
-| `latest`, `1.2.3`, `1.2`, `1` | releases |
-| `edge` | latest build of the `main` branch |
-| `sha-<commit>` | a specific commit |
+| `latest` | the newest release |
+| `1.2.3`, `1.2`, `1` | a specific release, or the newest release of a minor / major line |
 
 Images are built for `linux/amd64` and `linux/arm64`.
 

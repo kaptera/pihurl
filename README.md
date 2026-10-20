@@ -129,8 +129,10 @@ read/write scope). Without the variable, forks included, the publish steps are s
 
 | Event | Tags pushed to `<user>/pihurl` |
 |---|---|
-| push to `main` | `edge`, `sha-<short>` |
-| tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest`, `sha-<short>` (no bare `0` tag for `v0.x`) |
+| tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest` (no bare `0` tag for `v0.x`) |
+
+Pushes to `main` and pull requests only build the image and smoke-test it; nothing is published. To
+release: `git tag v1.2.3 && git push origin v1.2.3`.
 
 Images are built for `linux/amd64` and `linux/arm64`. The official image is
 [`0allitter0/pihurl`](https://hub.docker.com/r/0allitter0/pihurl); to use a published image:
