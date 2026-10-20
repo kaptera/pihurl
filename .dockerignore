@@ -1,0 +1,6 @@
+# Keep local build artifacts and the work volume out of the image context.
+.git
+server/node_modules
+server/dist
+work
+web-ui/*.test.js

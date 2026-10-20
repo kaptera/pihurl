@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0c0f">
+<title>pihurl — agentic API tests</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><div class="logo">π</div><div><b>pihurl</b><small>self-hosted · v0.1</small></div></div>
+    <nav class="nav" id="nav"></nav>
+    <div class="side-foot">
+      <button class="mini" data-act="go" data-v="providers"><div class="l">LLM</div><div class="v" id="sfProv"></div></button>
+      <button class="mini" data-act="go" data-v="spec"><div class="l">Spec</div><div class="v" id="sfSpec"></div></button>
+    </div>
+  </aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="brand"><div class="logo">π</div><b>pihurl</b></div>
+      <button class="chip" data-act="go" data-v="providers" id="tbProv"></button>
+    </div>
+
+    <!-- CHAT -->
+    <section class="view" id="v-chat">
+      <header class="vh chat-h">
+        <div class="min"><h1 id="chatTitle">New chat</h1><div class="ctx" id="ctx"></div></div>
+        <div class="acts"><button class="chip" id="modelChip" data-act="go" data-v="providers"></button><button class="btn sm" id="chatsBtn" data-act="chatMenu" aria-haspopup="true"><span data-i="chat"></span>Chats<span data-i="chev"></span></button><button class="btn sm" id="toolsBtn" data-act="toolsAll" title="Collapse or expand all tool calls" aria-label="Collapse or expand all tool calls"><span data-i="unfold"></span></button><button class="btn ghost sm" data-act="newChat">New chat</button></div>
+        <div class="cmenu" id="chatMenu" role="menu" hidden></div>
+      </header>
+      <div class="msgs" id="msgs"><div class="msgs-in" id="msgsIn"></div></div>
+      <div class="comp">
+        <div class="sugg" id="sugg"></div>
+        <form class="comp-in" id="form" autocomplete="off">
+          <textarea id="inp" rows="1" placeholder="Ask the agent to write, run or fix Hurl tests…"></textarea>
+          <button type="submit" class="send" id="sendBtn" aria-label="Send"></button>
+        </form>
+        <div class="hint">Enter to send · Shift+Enter for a new line · the agent can read, write and run commands in your project</div>
+      </div>
+    </section>
+
+    <!-- SPEC -->
+    <section class="view" id="v-spec">
+      <header class="vh"><div><h1>Spec</h1><div class="sub">The OpenAPI document the agent reads before writing tests.</div></div>
+        <div class="acts"><button class="btn primary" data-act="genUncovered"><span id="genIc"></span>Write tests for uncovered</button></div></header>
+      <div class="vs"><div class="pad"><div class="g2">
+        <aside>
+          <div class="field" id="specPick"><label class="lbl" for="specSel">Spec</label><div class="row"><select class="inp" id="specSel" style="flex:1;width:auto;min-width:0"></select><button class="btn sm danger" data-act="specDelete" title="Delete this spec" aria-label="Delete this spec"><span data-i="trash"></span></button></div></div>
+          <div class="drop" id="drop" data-act="pick"><span id="upIc"></span><b>Drop an OpenAPI file</b><small>.json · .yaml · .yml — or click to browse</small></div>
+          <input type="file" id="file" accept=".json,.yaml,.yml,application/json,text/yaml" hidden>
+          <div class="card cp" style="margin-top:14px" id="specInfo"></div>
+        </aside>
+        <section>
+          <div class="ep-tools">
+            <div class="search"><span id="seIc"></span><input class="inp" id="epq" placeholder="Filter endpoints…" autocomplete="off"></div>
+            <div class="row wrap" id="mfs"></div>
+          </div>
+          <div class="card" id="epList" style="overflow:hidden"></div>
+        </section>
+      </div></div></div>
+    </section>
+
+    <!-- PROVIDERS -->
+    <section class="view" id="v-providers">
+      <header class="vh"><div><h1>Providers</h1><div class="sub">Bring your own model — any OpenAI-compatible endpoint works.</div></div>
+        <div class="acts"><button class="btn primary" data-act="newProv"><span data-i="plus"></span>Add provider</button></div></header>
+      <div class="vs"><div class="pad"><div class="g3"><div id="provList"></div><div class="card cp" id="provForm"></div></div></div></div>
+    </section>
+
+    <!-- PROMPTS -->
+    <section class="view" id="v-prompts">
+      <header class="vh"><div><h1>Prompts</h1><div class="sub">Reusable templates and standing instructions for the agent.</div></div>
+        <div class="acts"><div class="seg" id="ptabs"><button data-act="ptab" data-v="templates">Templates</button><button data-act="ptab" data-v="instr">Project instructions</button></div></div></header>
+      <div class="vs"><div class="pad" id="promptBody"></div></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="view" id="v-settings">
+      <header class="vh"><div><h1>Settings</h1><div class="sub">Preferences for this browser, and where things live on the server.</div></div>
+        <div class="acts"><button class="btn sm" data-act="resetPrefs">Reset to defaults</button></div></header>
+      <div class="vs"><div class="pad" id="settingsBody"></div></div>
+    </section>
+
+    <!-- TESTS -->
+    <section class="view" id="v-tests">
+      <header class="vh"><div class="min"><h1>Tests &amp; Reports</h1><div class="sub" id="tSub"></div></div>
+        <div class="acts"><div class="seg" id="tseg"><button class="only-m" data-act="tview" data-v="files">Files</button><button data-act="tview" data-v="report">Report</button><button data-act="tview" data-v="source">Source</button></div>
+        <input class="inp mono" id="hostInp" style="width:auto;max-width:260px" placeholder="https://staging.example.com" autocomplete="off" spellcheck="false"><button class="btn primary" id="runAll" data-act="runAll"></button></div></header>
+      <div class="tests" id="tests">
+        <div class="t-files"><div class="tf-h"><span class="cbx" id="allCbx" data-act="allChk" title="Select all test files" role="checkbox" aria-label="Select all test files"></span><h3 id="tfCount"></h3><span class="spacer"></span><button class="btn sm" id="runSel" data-act="runSel"></button></div><div class="tf-list" id="tfList"></div></div>
+        <div class="t-main" id="tMain"></div>
+      </div>
+    </section>
+
+    <nav class="tabbar" id="tabbar"></nav>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="markdown.js"></script>
+<script src="grouping.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

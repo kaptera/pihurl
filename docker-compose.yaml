@@ -1,0 +1,16 @@
+services:
+  pihurl:
+    build: .
+    image: pihurl
+    restart: unless-stopped
+    ports:
+      # Local only: pihurl has no authentication and its agent can run shell commands.
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Where the "Ollama" provider preset points; the default reaches Ollama on the Docker host.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Specs, tests, reports, chats, logs and provider settings.
+      - ./work:/workspace
