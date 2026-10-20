@@ -49,7 +49,7 @@ server/
 | POST   | `/api/specs`            | upload a spec (`{name, content}`); validated, stored as `specs/<name>` |
 | DELETE | `/api/specs?path=`      | delete a spec                                                        |
 | GET    | `/api/providers`        | list providers (API keys masked) + defaults (Ollama URL)             |
-| POST   | `/api/providers`        | save / activate / delete a provider (rewrites `models.json`, restarts the agent) |
+| POST   | `/api/providers`        | save / activate / delete a provider (rewrites `models.json`, restarts the agent); `temperature` (0 to 2) and `contextWindow` (tokens) are optional, `null` clears them |
 | POST   | `/api/providers/test`   | real connectivity check; a blank key falls back to the stored one   |
 | GET    | `/api/tests`            | the `.hurl` files in the workspace, with source                      |
 | GET    | `/api/run`              | run history, newest first                                            |
@@ -111,6 +111,18 @@ agent cannot read:
 Files the server creates in the workspace are chowned to the agent user so that it can edit them. A workspace
 from an older version, which kept the state files in the workspace or in the state root, is migrated once at
 start: provider keys and logs go to `<state>`, chats, hosts and defaults to `<state>/projects/default/`.
+
+## Model settings
+
+A provider can carry two optional settings, both written to the model's entry in the agent's `models.json`:
+
+- **Temperature** becomes `samplingParams.temperature`, which pi sends with every request to OpenAI-compatible
+  APIs (it is ignored for Anthropic, and the UI says so). Unset means the model's own default, which is what
+  you want for reasoning models that reject a temperature.
+- **Context window** becomes the model's `contextWindow`. pi uses it to decide when to summarize old turns and to
+  show usage. It does not configure the model server: Ollama's OpenAI endpoint ignores `num_ctx`, so set the same
+  size with `OLLAMA_CONTEXT_LENGTH` or in a Modelfile, or Ollama cuts the prompt at its own default and the agent
+  loses the start of the conversation without an error.
 
 ## Isolation of the agent
 

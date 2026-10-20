@@ -387,3 +387,5 @@ select.inp{width:auto;padding:6px 28px 6px 10px;font-size:12.5px;appearance:none
 #chatsBtn .nb{margin-left:4px;position:static;background:var(--warn);color:#1a1200}
 #chatsBtn.busy-others{border-color:rgba(255,194,75,.5)}
 .cm-main .spin{width:10px;height:10px;border-width:2px;vertical-align:-1px}
+
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);white-space:nowrap;cursor:pointer}

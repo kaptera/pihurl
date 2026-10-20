@@ -132,8 +132,10 @@ export interface ProviderConfig {
 	baseUrl: string;
 	model: string;
 	apiKey?: string;
+	/** Unset = the model's own default. */
 	temperature?: number;
-	numCtx?: number;
+	/** Unset = pi's default. Tells pi how much context the model has; the server (Ollama) must be set up for it. */
+	contextWindow?: number;
 	active?: boolean;
 }
 
@@ -216,6 +218,10 @@ export function saveHosts(p: Project, list: HostConfig[]): void {
 
 export interface ModelEntry {
 	id: string;
+	/** Tokens of context pi may use; it plans compaction with this. */
+	contextWindow?: number;
+	/** Sent with every request (OpenAI-compatible APIs only). */
+	samplingParams?: { temperature?: number };
 }
 
 export interface ProviderModel {

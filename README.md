@@ -22,7 +22,7 @@ writes eight Hurl files, and pihurl runs them (8/8 files, 39 requests). Waiting 
 - **Send failures to the agent** with one click and let it decide whether the test or the API is
   wrong.
 - **Any model**: Ollama, LM Studio, vLLM and other OpenAI-compatible servers, OpenAI, Anthropic,
-  OpenRouter.
+  OpenRouter. Temperature and context window are set per provider.
 - **Projects**: one pihurl serves several APIs. Each project has its own specs, tests, reports, target host,
   instructions and chats, and each browser tab can be in a different one.
 - **Parallel chats**: start a second chat while the first is still working; both agents run at once, the
@@ -53,6 +53,8 @@ Open <http://localhost:3000>, then:
 
 1. **Providers** → add your model (for Ollama on the host use `http://host.docker.internal:11434/v1`).
    *Test connection*, *Save*.
+   For local models also set the *context window*, and give Ollama the same size
+   (`OLLAMA_CONTEXT_LENGTH`); its default is small and long chats are silently cut.
 2. **Spec** → drop an OpenAPI file, or skip this and ask the agent in the chat to create a spec for
    an API you name.
 3. **Tests & Reports** → type the base URL of the API under test in the field at the top.

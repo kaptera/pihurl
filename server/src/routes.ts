@@ -350,6 +350,17 @@ function maskKey(key: string): string {
 	return key.length <= 8 ? "••••" : `${key.slice(0, 3)}…${key.slice(-4)}`;
 }
 
+/** A numeric setting of a request body: a number in range, null to clear, absent to keep. A string is an error message. */
+function optionalNumber(body: Record<string, unknown>, key: string, current: number | undefined, min: number, max: number, integer = false): number | undefined | string {
+	if (!(key in body)) return current;
+	const v = body[key];
+	if (v === null || v === "") return undefined;
+	if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max || (integer && !Number.isInteger(v))) {
+		return `${key} must be ${integer ? "a whole number" : "a number"} from ${min} to ${max}`;
+	}
+	return v;
+}
+
 function publicProvider(p: ProviderConfig): ProviderConfig {
 	return { ...p, apiKey: p.apiKey ? maskKey(p.apiKey) : undefined };
 }
@@ -378,8 +389,15 @@ app.post("/api/providers", async (c) => {
 			baseUrl: typeof body.baseUrl === "string" ? body.baseUrl.trim() : existing?.baseUrl ?? "",
 			model: typeof body.model === "string" ? body.model.trim() : existing?.model ?? "",
 			apiKey: body.apiKey ? body.apiKey : existing?.apiKey,
-			temperature: body.temperature ?? existing?.temperature,
 		};
+		// null clears a setting (back to the model's default); absent keeps it
+		const temperature = optionalNumber(body, "temperature", existing?.temperature, 0, 2);
+		const contextWindow = optionalNumber(body, "contextWindow", existing?.contextWindow, 1024, 10_000_000, true);
+		if (typeof temperature === "string" || typeof contextWindow === "string") {
+			return c.json({ error: "invalid_provider", detail: String(typeof temperature === "string" ? temperature : contextWindow) }, 400);
+		}
+		if (temperature !== undefined) provider.temperature = temperature;
+		if (contextWindow !== undefined) provider.contextWindow = contextWindow;
 		// An explicit boolean flips active (deactivating the rest); a plain save
 		// keeps the provider's current active state, and a brand-new provider
 		// becomes active when nothing else is.

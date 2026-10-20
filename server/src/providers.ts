@@ -1,4 +1,4 @@
-import { config, loadProviders, saveModels, type ModelsFile, type ProviderConfig } from "./config.js";
+import { config, loadProviders, saveModels, type ModelEntry, type ModelsFile, type ProviderConfig } from "./config.js";
 import { listProjects, type Project } from "./projects.js";
 
 /**
@@ -56,6 +56,15 @@ export function providerByKey(key: string): ProviderConfig | undefined {
 	return list.find((p) => modelsKeyFor(p, list) === key);
 }
 
+/** The models.json entry of a provider's model: the id plus the settings the user chose. */
+export function modelEntry(p: ProviderConfig): ModelEntry {
+	const entry: ModelEntry = { id: p.model };
+	if (p.contextWindow) entry.contextWindow = p.contextWindow;
+	// pi applies sampling params to OpenAI-compatible APIs only, so there is nothing to send to Anthropic.
+	if (p.temperature !== undefined && p.kind !== "anthropic") entry.samplingParams = { temperature: p.temperature };
+	return entry;
+}
+
 // Rebuild the models.json of a project from the provider list. Called before an agent starts.
 export function syncModelsFromProviders(project: Project, list: ProviderConfig[]): void {
 	const models: ModelsFile = {};
@@ -67,7 +76,7 @@ export function syncModelsFromProviders(project: Project, list: ProviderConfig[]
 			api: p.kind === "anthropic" ? "anthropic-messages" : "openai-completions",
 			// pi hides models of a provider without a key; the proxy replaces this with the real one.
 			apiKey: "proxy",
-			models: [{ id: p.model }],
+			models: [modelEntry(p)],
 		};
 	}
 	saveModels(project, models);

@@ -126,15 +126,21 @@ const tool = (id, name, args) => [
 	{ index: 0, delta: {}, finish_reason: "tool_calls" },
 ];
 
+// What the agent last sent to the model (without the conversation), for tests of provider settings.
+let lastRequest = {};
+
 export function startModel(port = LLM_PORT) {
 	const server = http.createServer((req, res) => {
 		let raw = "";
 		req.on("data", (d) => (raw += d));
 		req.on("end", () => {
+			if (req.url === "/_last") return json(res, 200, lastRequest);
 			if (req.url.endsWith("/models")) return json(res, 200, { data: [{ id: "mock-1" }] });
 			if (!req.url.endsWith("/chat/completions")) { res.writeHead(404); return res.end(); }
 
 			const body = JSON.parse(raw);
+			const { messages: _messages, tools: _tools, ...params } = body;
+			lastRequest = params;
 			const toolResults = body.messages.filter((m) => m.role === "tool").length;
 			const last = [...body.messages].reverse().find((m) => m.role === "user");
 			const prompt = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content);
