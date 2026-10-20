@@ -1,11 +1,9 @@
 import { spawn } from "node:child_process";
 import {
 	existsSync,
-	mkdirSync,
 	readFileSync,
 	readdirSync,
 	rmSync,
-	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { agentEnv, mkdirAgent, spawnIdentity, writeAgentFile } from "./agent.js";

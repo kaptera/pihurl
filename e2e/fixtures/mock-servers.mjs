@@ -36,7 +36,7 @@ export function startApi(port = API_PORT) {
 			const m = req.url.match(/^\/users(?:\/([\w-]+))?$/);
 			if (!m) return json(res, 404, { error: "not found" });
 			if (req.method === "POST" && !m[1]) {
-				let body = {};
+				let body;
 				try { body = JSON.parse(raw || "{}"); } catch { return json(res, 400, { error: "bad json" }); }
 				if (!body.name) return json(res, 422, { error: "name required" });
 				const id = `u${nextId++}`;
@@ -139,8 +139,7 @@ export function startModel(port = LLM_PORT) {
 			if (!req.url.endsWith("/chat/completions")) { res.writeHead(404); return res.end(); }
 
 			const body = JSON.parse(raw);
-			const { messages: _messages, tools: _tools, ...params } = body;
-			lastRequest = params;
+			lastRequest = Object.fromEntries(Object.entries(body).filter(([k]) => k !== "messages" && k !== "tools"));
 			const toolResults = body.messages.filter((m) => m.role === "tool").length;
 			const last = [...body.messages].reverse().find((m) => m.role === "user");
 			const prompt = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content);

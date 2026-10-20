@@ -148,12 +148,17 @@ npm test                            # backend tests
 node --test ../web-ui/*.test.js     # UI tests (Markdown renderer, test grouping)
 ```
 
+Linting (ESLint, for the web UI) runs from the repository root: `npm ci && npm run lint`. The backend is type-checked
+with `npm run typecheck` in `server/`.
+
 Browser tests drive the built image with a scripted model and a tiny target API, so they need neither an LLM
 nor the internet: `docker build -t pihurl . && e2e/run.sh pihurl` (Docker and Node; the first run downloads
 Chromium).
 
 Hurl must be on `PATH` when running outside Docker. The web UI is plain files in `web-ui/` and has no
-build step. See [`server/README.md`](server/README.md) for the details.
+build step: `app.js` is the entry point (events and start-up), and `js/` holds one ES module per
+view (`chat`, `spec`, `providers`, `prompts`, `tests`, `settings`, `projects`) plus the shared `core`, `api`,
+`hurl` and `nav`. See [`server/README.md`](server/README.md) for the details.
 
 ## CI and releases
 

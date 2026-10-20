@@ -22,7 +22,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: server/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - name: Lint
+        run: |
+          npm ci
+          npm run lint
       - name: Backend
         working-directory: server
         run: |

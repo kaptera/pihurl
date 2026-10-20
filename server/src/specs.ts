@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { writeAgentFile } from "./agent.js";

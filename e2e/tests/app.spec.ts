@@ -167,6 +167,35 @@ test("provider errors are shown in the chat", async () => {
 	await expect(page.locator(".stopnote")).toContainText("Incorrect API key provided");
 });
 
+test("every view opens and its controls respond", async () => {
+	await nav("Spec").click();
+	await expect(page.locator("#specInfo")).toContainText("Mock Users");
+	await page.locator("#mfs .chip", { hasText: "GET" }).click();
+	await page.locator(".eph").first().click();
+	await expect(page.locator(".ep.open")).toHaveCount(1);
+
+	await nav("Providers").click();
+	await page.locator("[data-act=newProv]").click();
+	await page.locator("[data-act=preset][data-k=ollama]").click();
+	await expect(page.locator("#pf-model")).not.toHaveValue("");
+	await page.locator("#eyeBtn").click();
+	await expect(page.locator("#pf-key")).toHaveAttribute("type", "text");
+
+	await nav("Prompts").click();
+	await expect(page.locator("#tpl-body")).toBeVisible();
+	await page.locator("#ptabs button", { hasText: "Project instructions" }).click();
+	await expect(page.locator("#instr")).toBeVisible();
+
+	await nav("Tests & Reports").click();
+	await expect(page.locator("#tfList")).toContainText("users.hurl");
+	await page.locator("[data-act=rfilter][data-v=fail]").click();
+	await page.locator("[data-act=rfilter][data-v=all]").click();
+
+	await nav("Settings").click();
+	await expect(page.locator("#settingsBody")).toContainText("About this server");
+	await nav("Chat").click();
+});
+
 test("nothing logged an error in the browser", async () => {
 	expect(problems).toEqual([]);
 });

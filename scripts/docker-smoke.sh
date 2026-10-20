@@ -23,7 +23,7 @@ echo "$info" | grep -q '"hurl":"hurl ' || { echo "smoke: hurl is missing from th
 echo "$info" | grep -q '"agentIsolated":true' || { echo "smoke: the agent does not run as an unprivileged user" >&2; exit 1; }
 
 # the web UI and its scripts are served
-for path in / /app.js /markdown.js /grouping.js /style.css; do
+for path in / /app.js /js/core.js /markdown.js /grouping.js /style.css; do
   code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${PORT}${path}")"
   [ "$code" = "200" ] || { echo "smoke: ${path} answered ${code}" >&2; exit 1; }
 done

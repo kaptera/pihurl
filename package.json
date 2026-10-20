@@ -1,0 +1,14 @@
+{
+	"name": "pihurl-dev",
+	"private": true,
+	"description": "Linting for the web UI and the browser-test fixtures. The product itself is in server/ and web-ui/.",
+	"license": "MIT",
+	"scripts": {
+		"lint": "eslint web-ui e2e/fixtures"
+	},
+	"devDependencies": {
+		"@eslint/js": "^10",
+		"eslint": "^10",
+		"globals": "^17"
+	}
+}

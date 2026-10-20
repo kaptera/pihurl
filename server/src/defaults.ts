@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { writeAgentFile } from "./agent.js";
 import { loadTemplates, saveTemplates, type PromptTemplate } from "./config.js";
 import type { Project } from "./projects.js";

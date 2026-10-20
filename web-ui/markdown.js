@@ -42,6 +42,8 @@
 		s = s.replace(/(^|[^\w])_(?=[^\s_])([^_\n]*?[^\s_])_(?![\w])/g, "$1<em>$2</em>");
 		s = s.replace(/~~(?=\S)([\s\S]*?\S)~~/g, "<del>$1</del>");
 
+		// NUL marks the placeholders of stashed code, which cannot occur in the input
+		// eslint-disable-next-line no-control-regex
 		return s.replace(/\u0000(\d+)\u0000/g, (_, i) => stash[Number(i)]);
 	}
 
