@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync, Stats } from "node:fs";
 import { join } from "node:path";
-import { config } from "./config.js";
+import type { Project } from "./projects.js";
 
 /**
  * Lists the Hurl test files under <workspace>/tests.
@@ -24,8 +24,8 @@ function isHurl(p: string): boolean {
 	return /\.(hurl|http)$/.test(p);
 }
 
-export function listTestFiles(): TestFile[] {
-	const dir = join(config.workspace, "tests");
+export function listTestFiles(p: Project): TestFile[] {
+	const dir = join(p.dir, "tests");
 	if (!existsSync(dir)) return [];
 
 	const out: TestFile[] = [];
@@ -62,6 +62,6 @@ export function listTestFiles(): TestFile[] {
 	return out;
 }
 
-export function testFilesExist(): boolean {
-	return listTestFiles().length > 0;
+export function testFilesExist(p: Project): boolean {
+	return listTestFiles(p).length > 0;
 }

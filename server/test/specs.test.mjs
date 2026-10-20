@@ -10,6 +10,8 @@ process.env.PIHURL_STATE = root;
 process.env.WORKSPACE = join(root, "ws");
 mkdirSync(process.env.WORKSPACE, { recursive: true });
 const { parseSpec, saveSpec, listSpecs, deleteSpec, specFileName } = await import("../dist/specs.js");
+const { defaultProject } = await import("../dist/projects.js");
+const project = defaultProject();
 
 const OAS3 = `
 openapi: 3.0.3
@@ -65,25 +67,25 @@ test("rejects documents that are not specs, with a readable reason", () => {
 test("saves, lists (workspace root and specs/), reports broken files, deletes", () => {
 	assert.equal(specFileName("../../My API (v2).yaml"), "My-API-v2-.yaml");
 	assert.equal(specFileName("petstore"), "petstore.yaml");
-	const path = saveSpec("objects.yaml", OAS3);
+	const path = saveSpec(project, "objects.yaml", OAS3);
 	assert.equal(path, "specs/objects.yaml");
-	assert.throws(() => saveSpec("bad.yaml", "nope: 1"), /version field/);
+	assert.throws(() => saveSpec(project, "bad.yaml", "nope: 1"), /version field/);
 	assert.equal(existsSync(join(process.env.WORKSPACE, "specs", "bad.yaml")), false);
 
 	// what an agent leaves behind: a spec in the root and a broken one in specs/
 	writeFileSync(join(process.env.WORKSPACE, "openapi.other.yaml"), OAS3.replace("Objects API", "Other"));
 	writeFileSync(join(process.env.WORKSPACE, "specs", "broken.yaml"), "openapi: 3.0.0\n");
 	writeFileSync(join(process.env.WORKSPACE, "notes.yaml"), "x: 1");
-	const list = listSpecs();
+	const list = listSpecs(project);
 	assert.deepEqual(list.map((s) => s.path).sort(), ["openapi.other.yaml", "specs/broken.yaml", "specs/objects.yaml"]);
 	assert.match(list.find((s) => s.path === "specs/broken.yaml").error, /"paths"/);
 	assert.equal(list.find((s) => s.path === "openapi.other.yaml").title, "Other");
 
-	assert.equal(deleteSpec("../ws/../outside.yaml"), false);
-	assert.equal(deleteSpec("notes.yaml"), false); // not a spec name
-	assert.equal(deleteSpec("specs/objects.yaml"), true);
-	assert.equal(deleteSpec("openapi.other.yaml"), true);
-	assert.equal(deleteSpec("specs/objects.yaml"), false);
+	assert.equal(deleteSpec(project, "../ws/../outside.yaml"), false);
+	assert.equal(deleteSpec(project, "notes.yaml"), false); // not a spec name
+	assert.equal(deleteSpec(project, "specs/objects.yaml"), true);
+	assert.equal(deleteSpec(project, "openapi.other.yaml"), true);
+	assert.equal(deleteSpec(project, "specs/objects.yaml"), false);
 });
 
 test("the skeleton in the openapi-spec skill is a valid spec", async () => {
@@ -98,22 +100,22 @@ test("seeding upgrades untouched defaults and keeps edited ones", async () => {
 	const { seedDefaults, DEFAULT_AGENTS_MD } = await import("../dist/defaults.js");
 	const { readFileSync, writeFileSync } = await import("node:fs");
 	const agents = join(process.env.WORKSPACE, "AGENTS.md");
-	seedDefaults();
+	seedDefaults(project);
 	assert.equal(readFileSync(agents, "utf8"), DEFAULT_AGENTS_MD);
 	assert.ok(existsSync(join(process.env.WORKSPACE, ".pi", "skills", "openapi-spec", "SKILL.md")));
 
 	// an older shipped version (recorded hash) is replaced by the new default
-	const rec = join(root, "defaults.json");
+	const rec = project.defaultsPath;
 	writeFileSync(agents, "old default");
 	const r = JSON.parse(readFileSync(rec, "utf8"));
 	const { createHash } = await import("node:crypto");
 	r.agents = createHash("sha256").update("old default").digest("hex").slice(0, 16);
 	writeFileSync(rec, JSON.stringify(r));
-	seedDefaults();
+	seedDefaults(project);
 	assert.equal(readFileSync(agents, "utf8"), DEFAULT_AGENTS_MD);
 
 	// the user's own text stays
 	writeFileSync(agents, "my instructions");
-	seedDefaults();
+	seedDefaults(project);
 	assert.equal(readFileSync(agents, "utf8"), "my instructions");
 });

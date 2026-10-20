@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentIdentity, mkdirAgent, writeAgentFile } from "./agent.js";
+import { agentIdentity, writeAgentFile } from "./agent.js";
+import type { Project } from "./projects.js";
 
 /**
  * Configuration for the pihurl backend.
@@ -19,10 +20,6 @@ function env(name: string, fallback = ""): string {
 const stateDir = resolve(env("PIHURL_STATE", join(homedir(), ".pihurl")));
 const workspace = resolve(env("WORKSPACE", join(stateDir, "workspace")));
 
-// Prompt templates shown in the UI. Kept in the volume under .pi/prompts so
-// they travel with the workspace.
-const promptsDir = join(workspace, ".pi", "prompts");
-
 export const config = {
 	// Port the HTTP server listens on.
 	port: Number(env("PORT", "3000")),
@@ -31,42 +28,16 @@ export const config = {
 	// without a volume, but the Dockerfile mounts it at /workspace.
 	stateDir,
 
-	// Working folder pi operates in (`/workspace` in the container).
+	// Root of the agent's files: the default project's directory, and .projects/ for the others
+	// (`/workspace` in the container).
 	workspace,
-
-	// Provider registry (models.json) + env for keys. Kept inside stateDir.
-	providersPath: join(stateDir, "providers.json"),
-
-	// Where Hurl reports are written; previous runs are archived for history.
-	reportDir: join(workspace, "report"),
-
-	// Prompt templates for the UI (not pi slash commands).
-	templatesPath: join(promptsDir, "templates.json"),
-
-	// Standing instructions. pi loads AGENTS.md from its working folder on every
-	// start, so this is the file the "Project instructions" tab edits.
-	instructionsPath: join(workspace, "AGENTS.md"),
-
-	// Variables for the current target (host=...). The UI writes it, the agent
-	// passes it to hurl via --variables-file.
-	hurlEnvPath: join(workspace, "hurl.env"),
 
 	// Default base URL offered for the Ollama preset. Inside Docker "localhost" is
 	// the container itself, so the compose file / docker run sets OLLAMA_HOST.
 	ollamaHost: env("OLLAMA_HOST", "http://localhost:11434").replace(/\/+$/, ""),
 
-	// A registry of known API hosts (for the run host selector). In stateDir.
-	hostsPath: join(stateDir, "hosts.json"),
-
-	// Project-level models.json: OpenAI-compatible endpoints Pi reads to discover
-	// models. Written by the backend when a provider is added; travels with the
-	// workspace volume so pi can find the endpoint at startup.
-	modelsPath: join(workspace, ".pi", "models.json"),
-
-	// Pi's agent directory. We point it at the workspace .pi folder (via the
-	// PI_CODING_AGENT_DIR env) so models.json lives in the volume and travels
-	// with Docker instead of leaking into ~/.pi/agent.
-	agentDir: join(workspace, ".pi"),
+	// Provider registry (with keys): shared by all projects, readable by the server only.
+	providersPath: join(stateDir, "providers.json"),
 
 	// The web-ui SPA lives at /app/web-ui in the image (static assets stay in
 	// the image; only PIHURL_STATE is a volume). For local dev we can point
@@ -149,7 +120,7 @@ function resolvePiCli(): string {
 }
 
 export function ensureDirs(): void {
-	for (const d of [config.stateDir, config.workspace, config.reportDir, config.webUiDir]) {
+	for (const d of [config.stateDir, config.workspace, config.webUiDir]) {
 		if (!existsSync(d)) mkdirSync(d, { recursive: true });
 	}
 }
@@ -192,28 +163,28 @@ export interface PromptTemplate {
 	builtin?: boolean;
 }
 
-export function loadTemplates(): PromptTemplate[] {
+export function loadTemplates(p: Project): PromptTemplate[] {
 	try {
-		return JSON.parse(readFileSync(config.templatesPath, "utf8")) as PromptTemplate[];
+		return JSON.parse(readFileSync(p.templatesPath, "utf8")) as PromptTemplate[];
 	} catch {
 		return [];
 	}
 }
 
-export function saveTemplates(list: PromptTemplate[]): void {
-	writeAgentFile(config.templatesPath, JSON.stringify(list, null, 2));
+export function saveTemplates(p: Project, list: PromptTemplate[]): void {
+	writeAgentFile(p.templatesPath, JSON.stringify(list, null, 2));
 }
 
-export function loadInstructions(): string {
+export function loadInstructions(p: Project): string {
 	try {
-		return readFileSync(config.instructionsPath, "utf8");
+		return readFileSync(p.instructionsPath, "utf8");
 	} catch {
 		return "";
 	}
 }
 
-export function saveInstructions(text: string): void {
-	writeAgentFile(config.instructionsPath, text);
+export function saveInstructions(p: Project, text: string): void {
+	writeAgentFile(p.instructionsPath, text);
 }
 
 // ---- hosts ------------------------------------------------------------------
@@ -225,17 +196,17 @@ export interface HostConfig {
 	updatedAt?: number;
 }
 
-export function loadHosts(): HostConfig[] {
+export function loadHosts(p: Project): HostConfig[] {
 	try {
-		return JSON.parse(readFileSync(config.hostsPath, "utf8")) as HostConfig[];
+		return JSON.parse(readFileSync(p.hostsPath, "utf8")) as HostConfig[];
 	} catch {
 		return [];
 	}
 }
 
-export function saveHosts(list: HostConfig[]): void {
-	mkdirSync(config.stateDir, { recursive: true });
-	writeFileSync(config.hostsPath, JSON.stringify(list, null, 2));
+export function saveHosts(p: Project, list: HostConfig[]): void {
+	mkdirSync(p.stateDir, { recursive: true });
+	writeFileSync(p.hostsPath, JSON.stringify(list, null, 2));
 }
 
 // ---- models.json ------------------------------------------------------------
@@ -256,15 +227,15 @@ export interface ProviderModel {
 
 export type ModelsFile = Record<string, ProviderModel>;
 
-export function loadModels(): ModelsFile {
+export function loadModels(p: Project): ModelsFile {
 	try {
-		const raw = JSON.parse(readFileSync(config.modelsPath, "utf8")) as { providers?: ModelsFile };
+		const raw = JSON.parse(readFileSync(p.modelsPath, "utf8")) as { providers?: ModelsFile };
 		return raw.providers ?? {};
 	} catch {
 		return {};
 	}
 }
 
-export function saveModels(models: ModelsFile): void {
-	writeAgentFile(config.modelsPath, JSON.stringify({ providers: models }, null, 2));
+export function saveModels(p: Project, models: ModelsFile): void {
+	writeAgentFile(p.modelsPath, JSON.stringify({ providers: models }, null, 2));
 }

@@ -23,6 +23,10 @@ writes eight Hurl files, and pihurl runs them (8/8 files, 39 requests). Waiting 
   wrong.
 - **Any model**: Ollama, LM Studio, vLLM and other OpenAI-compatible servers, OpenAI, Anthropic,
   OpenRouter.
+- **Projects**: one pihurl serves several APIs. Each project has its own specs, tests, reports, target host,
+  instructions and chats, and each browser tab can be in a different one.
+- **Parallel chats**: start a second chat while the first is still working; both agents run at once, the
+  Chats menu shows which are busy, and a second tab on the same chat follows it live.
 - **Chats persist** across reloads, restarts and provider changes; there is an application log for
   checking what the agent did.
 
@@ -56,9 +60,12 @@ Open <http://localhost:3000>, then:
 
 Without Compose: `./run.sh [port]` builds the image and starts it in the foreground.
 
-Two volumes: `./work` is the agent's project (specs, tests, reports, chat transcripts) and is yours to
-browse and edit; the named volume `pihurl-state` (mounted at `/state`) holds what the agent must not see:
-provider API keys, the chat index and the logs. Delete both to start over.
+Two volumes: `./work` is the agent's workspace (specs, tests, reports, chat transcripts; the first project
+is the folder itself, others are in `.projects/`) and is yours to browse and edit; the named volume
+`pihurl-state` (mounted at `/state`) holds what the agent must not see: provider API keys, the chat indexes
+and the logs. Delete both to start over.
+
+Up to four agents (chats) run at once; change it with `PIHURL_MAX_AGENTS`.
 
 To protect the UI with a token, start it with `PIHURL_TOKEN` set (`openssl rand -hex 24` makes a good one):
 
@@ -80,17 +87,18 @@ Browser ── HTTP / SSE ──▶ backend (Node, Hono)
 The agent's project folder and the server's private state are separate:
 
 ```
-/workspace                 owned by the agent user
+/workspace                 owned by the agent user; this is the "default" project
 ├── AGENTS.md              instructions the agent reads (editable in the UI)
 ├── specs/                 OpenAPI documents
 ├── tests/<tag>/*.hurl     tests written by the agent
 ├── hurl.env               host=<the target API>, used by the agent's own hurl runs
 ├── report/<run id>/       Hurl reports and the normalised result of each run
-└── .pi/                   models.json (no keys), skills, chat transcripts
+├── .pi/                   models.json (no keys), skills, chat transcripts
+└── .projects/<id>/        every other project: the same layout again
 
 /state                     root only (0700), invisible to the agent
 ├── providers.json         providers including their API keys
-├── chats.json, hosts.json, defaults.json
+├── projects.json, projects/<id>/   project list; per project the chat index, hosts, defaults
 └── logs/pihurl.log        application log (JSON lines)
 ```
 

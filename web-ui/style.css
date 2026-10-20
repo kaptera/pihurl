@@ -377,3 +377,13 @@ select.inp{width:auto;padding:6px 28px 6px 10px;font-size:12.5px;appearance:none
 .login-card h2{font-size:20px;letter-spacing:-.02em}
 .login-card .btn{justify-content:center;padding:10px}
 .login-err{min-height:18px;font-size:12.5px;color:var(--bad)}
+
+/* projects */
+.proj{display:flex;align-items:center;gap:8px;width:100%;margin:0 0 12px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);font-size:13px;font-weight:550;text-align:left}
+.proj:hover{border-color:var(--line2);background:var(--panel2)}
+.proj .pn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj small{display:block;color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;font-weight:650}
+.pmenu{position:fixed;right:auto;top:auto;width:min(320px,calc(100vw - 28px))}
+#chatsBtn .nb{margin-left:4px;position:static;background:var(--warn);color:#1a1200}
+#chatsBtn.busy-others{border-color:rgba(255,194,75,.5)}
+.cm-main .spin{width:10px;height:10px;border-width:2px;vertical-align:-1px}

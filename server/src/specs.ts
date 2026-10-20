@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { basename, join, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { writeAgentFile } from "./agent.js";
-import { config } from "./config.js";
+import type { Project } from "./projects.js";
 
 /**
  * API specs.
@@ -47,8 +47,6 @@ export interface SpecInfo {
 	endpoints: SpecEndpoint[];
 	error?: string;
 }
-
-export const specsDir = join(config.workspace, "specs");
 
 const SPEC_EXT = /\.(ya?ml|json)$/i;
 const ROOT_SPEC = /^(openapi|swagger)[\w.-]*\.(ya?ml|json)$/i;
@@ -125,8 +123,8 @@ export function parseSpec(text: string): Pick<SpecInfo, "title" | "version" | "s
 	};
 }
 
-function describe(path: string): SpecInfo {
-	const abs = join(config.workspace, path);
+function describe(p: Project, path: string): SpecInfo {
+	const abs = join(p.dir, path);
 	const st = statSync(abs);
 	const base: SpecInfo = {
 		path,
@@ -147,15 +145,15 @@ function describe(path: string): SpecInfo {
 }
 
 /** Every spec in the workspace, most recently changed first. */
-export function listSpecs(): SpecInfo[] {
+export function listSpecs(p: Project): SpecInfo[] {
 	const paths: string[] = [];
-	if (existsSync(specsDir)) {
-		for (const n of readdirSync(specsDir)) if (SPEC_EXT.test(n) && statSync(join(specsDir, n)).isFile()) paths.push(`specs/${n}`);
+	if (existsSync(p.specsDir)) {
+		for (const n of readdirSync(p.specsDir)) if (SPEC_EXT.test(n) && statSync(join(p.specsDir, n)).isFile()) paths.push(`specs/${n}`);
 	}
-	for (const n of readdirSync(config.workspace)) {
-		if (ROOT_SPEC.test(n) && statSync(join(config.workspace, n)).isFile()) paths.push(n);
+	for (const n of existsSync(p.dir) ? readdirSync(p.dir) : []) {
+		if (ROOT_SPEC.test(n) && statSync(join(p.dir, n)).isFile()) paths.push(n);
 	}
-	return paths.map(describe).sort((a, b) => b.updated.localeCompare(a.updated));
+	return paths.map((x) => describe(p, x)).sort((a, b) => b.updated.localeCompare(a.updated));
 }
 
 /** A safe file name for an uploaded spec: letters, digits, dot, dash, underscore. */
@@ -166,20 +164,20 @@ export function specFileName(raw: string): string {
 }
 
 /** Validate and store an uploaded spec as specs/<name>. Returns its workspace-relative path. */
-export function saveSpec(name: string, content: string): string {
+export function saveSpec(p: Project, name: string, content: string): string {
 	if (!content.trim()) throw new Error("the file is empty");
 	if (content.length > MAX_BYTES) throw new Error("spec is larger than 5 MB");
 	parseSpec(content); // throws with a readable message
 	const file = specFileName(name);
-	writeAgentFile(join(specsDir, file), content);
+	writeAgentFile(join(p.specsDir, file), content);
 	return `specs/${file}`;
 }
 
 /** Delete a spec by its workspace-relative path; false if it is not one of ours. */
-export function deleteSpec(path: string): boolean {
-	const abs = resolve(config.workspace, path);
-	const inSpecs = abs.startsWith(specsDir + sep) && SPEC_EXT.test(abs);
-	const inRoot = resolve(config.workspace, basename(abs)) === abs && ROOT_SPEC.test(basename(abs));
+export function deleteSpec(p: Project, path: string): boolean {
+	const abs = resolve(p.dir, path);
+	const inSpecs = abs.startsWith(p.specsDir + sep) && SPEC_EXT.test(abs);
+	const inRoot = resolve(p.dir, basename(abs)) === abs && ROOT_SPEC.test(basename(abs));
 	if ((!inSpecs && !inRoot) || !existsSync(abs)) return false;
 	rmSync(abs);
 	return true;

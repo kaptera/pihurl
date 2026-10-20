@@ -3,6 +3,7 @@ import https from "node:https";
 import { config } from "./config.js";
 import { log } from "./log.js";
 import { providerByKey, upstreamBasePath } from "./providers.js";
+import { getProject } from "./projects.js";
 import { listSpecs } from "./specs.js";
 
 /**
@@ -13,7 +14,7 @@ import { listSpecs } from "./specs.js";
  *  - /llm/<provider>/...  the model proxy: forwards pi's requests to the provider's real endpoint
  *    and adds the real API key. models.json points at it (providers.ts). Only paths below the
  *    provider's own base path are forwarded, so the key cannot be used elsewhere on that host.
- *  - GET /api/specs       the parsed spec list, for the agent to check the specs it wrote.
+ *  - GET /p/<project>/api/specs   the project's parsed spec list, for the agent to check the specs it wrote.
  */
 
 const STRIP_REQUEST_HEADERS = new Set([
@@ -78,8 +79,13 @@ export function startInternalServer(): http.Server {
 	const server = http.createServer((req, res) => {
 		const url = new URL(req.url ?? "/", "http://localhost");
 		if (url.pathname.startsWith("/llm/")) return proxyModel(req, res, url);
-		if (req.method === "GET" && url.pathname === "/api/specs") return json(res, 200, { specs: listSpecs() });
-		if (req.method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true });
+		// /p/<project>/api/specs: the agent of a project lists that project's specs
+		const m = url.pathname.match(/^\/p\/([^/]+)\/api\/specs$/);
+		if (req.method === "GET" && m) {
+			const project = getProject(m[1]);
+			return project ? json(res, 200, { specs: listSpecs(project) }) : json(res, 404, { error: "unknown project" });
+		}
+		if (req.method === "GET" && (url.pathname === "/health" || /^\/p\/[^/]+\/health$/.test(url.pathname))) return json(res, 200, { ok: true });
 		return json(res, 404, { error: "not_found" });
 	});
 	server.listen(config.internalPort, "127.0.0.1", () => {

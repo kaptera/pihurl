@@ -10,6 +10,7 @@
 //   SPECTEST    write specs/mock-users.yaml, say it is done
 //   SECTEST     run a shell probe that prints what the agent can and cannot see
 //   ERRORTEST   answer 401, like a wrong API key
+//   SLOWTEST    answer "Slow answer finished." after four seconds
 //
 // The target API is a bare in-memory users resource.
 import http from "node:http";
@@ -139,6 +140,8 @@ export function startModel(port = LLM_PORT) {
 			const prompt = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content);
 
 			if (prompt.includes("ERRORTEST")) return json(res, 401, { error: { message: "Incorrect API key provided" } });
+			// answers after a few seconds, so that two chats can be working at the same time
+			if (prompt.includes("SLOWTEST")) return void setTimeout(() => sse(res, text("Slow answer finished.")), 4000);
 			if (prompt.includes("SECTEST")) {
 				return sse(res, toolResults === 0 ? tool("call_sec", "bash", { command: PROBE }) : text("Checked."));
 			}

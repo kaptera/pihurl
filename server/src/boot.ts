@@ -15,7 +15,16 @@ import { log } from "./log.js";
  * Older versions kept the state inside the workspace; those files are moved out once.
  */
 
-const LEGACY = ["providers.json", "hosts.json", "chats.json", "chat.json", "defaults.json", "logs"];
+// Where state files used to be, and where they live now. Versions before projects kept everything
+// in the workspace, then in the state root; per-project files now sit in <state>/projects/default.
+const MOVES: { name: string; to: string }[] = [
+	{ name: "providers.json", to: "" },
+	{ name: "logs", to: "" },
+	{ name: "hosts.json", to: "projects/default" },
+	{ name: "chats.json", to: "projects/default" },
+	{ name: "chat.json", to: "projects/default" },
+	{ name: "defaults.json", to: "projects/default" },
+];
 
 function inside(child: string, parent: string): boolean {
 	const rel = relative(resolve(parent), resolve(child));
@@ -43,19 +52,23 @@ export function bootLayout(): void {
 	}
 
 	mkdirSync(config.stateDir, { recursive: true });
-	if (!inside(config.stateDir, config.workspace)) {
-		const moved: string[] = [];
-		for (const name of LEGACY) {
-			const from = join(config.workspace, name);
-			const to = join(config.stateDir, name);
-			if (existsSync(from) && !existsSync(to)) {
-				move(from, to);
+	mkdirSync(join(config.stateDir, "projects", "default"), { recursive: true });
+	const moved: string[] = [];
+	// the workspace first (oldest layout), then the state root (layout before projects)
+	const sources = inside(config.stateDir, config.workspace) ? [config.stateDir] : [config.workspace, config.stateDir];
+	for (const src of sources) {
+		for (const { name, to } of MOVES) {
+			const from = join(src, name);
+			const dest = join(config.stateDir, to, name);
+			if (resolve(from) !== resolve(dest) && existsSync(from) && !existsSync(dest)) {
+				mkdirSync(join(config.stateDir, to), { recursive: true });
+				move(from, dest);
 				moved.push(name);
 			}
 		}
-		// log only afterwards: the first log line creates logs/ and would hide a legacy one
-		if (moved.length) log("info", "state.migrated", { files: moved });
 	}
+	// log only afterwards: the first log line creates logs/ and would hide a legacy one
+	if (moved.length) log("info", "state.migrated", { files: moved });
 	if (agent.enabled) chmodSync(config.stateDir, 0o700);
 
 	mkdirSync(config.workspace, { recursive: true });

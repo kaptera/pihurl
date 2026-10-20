@@ -35,6 +35,7 @@ writeFileSync(join(process.env.PIHURL_STATE, "providers.json"), JSON.stringify([
 
 const { startInternalServer } = await import("../dist/internal.js");
 const { syncModelsAtBoot } = await import("../dist/providers.js");
+const { defaultProject, createProject } = await import("../dist/projects.js");
 const internal = startInternalServer();
 await new Promise((r) => internal.once("listening", r));
 const base = `http://127.0.0.1:${process.env.PIHURL_INTERNAL_PORT}`;
@@ -42,8 +43,11 @@ const base = `http://127.0.0.1:${process.env.PIHURL_INTERNAL_PORT}`;
 test.after(() => { internal.close(); upstream.close(); });
 
 test("models.json points pi at the proxy and holds no key or upstream address", () => {
+	const second = createProject("Second API");
 	syncModelsAtBoot();
-	const raw = readFileSync(join(process.env.WORKSPACE, ".pi", "models.json"), "utf8");
+	// every project gets its own models.json, all pointing at the same proxy
+	assert.ok(JSON.parse(readFileSync(second.modelsPath, "utf8")).providers["local-llm"].baseUrl.startsWith(`${base}/llm/local-llm`));
+	const raw = readFileSync(defaultProject().modelsPath, "utf8");
 	const models = JSON.parse(raw).providers;
 	assert.equal(models["local-llm"].baseUrl, `${base}/llm/local-llm/v1`);
 	assert.equal(models["claude"].baseUrl, `${base}/llm/claude`);
@@ -81,9 +85,11 @@ test("the key cannot be used outside the provider's base path, nor for unknown p
 	assert.equal(seen.length, n, "nothing reached the upstream");
 });
 
-test("the agent can list specs and nothing else", async () => {
-	const specs = await (await fetch(`${base}/api/specs`)).json();
+test("the agent can list the specs of its project and nothing else", async () => {
+	const specs = await (await fetch(`${base}/p/default/api/specs`)).json();
 	assert.ok(Array.isArray(specs.specs));
+	assert.equal((await fetch(`${base}/p/nope/api/specs`)).status, 404);
+	assert.equal((await fetch(`${base}/api/specs`)).status, 404);
 	assert.equal((await fetch(`${base}/api/providers`)).status, 404);
 	assert.equal((await fetch(`${base}/api/run`, { method: "POST" })).status, 404);
 	assert.equal((await fetch(`${base}/health`)).status, 200);

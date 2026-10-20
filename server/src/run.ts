@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { agentEnv, mkdirAgent, spawnIdentity, writeAgentFile } from "./agent.js";
-import { config } from "./config.js";
+import type { Project } from "./projects.js";
 import { log } from "./log.js";
 
 /**
@@ -118,7 +118,7 @@ const MAX_BODY_BYTES = 20 * 1024;
 const MAX_HISTORY = 50;
 const FILE_TIMEOUT_MS = 5 * 60_000;
 
-let running = false;
+const running = new Set<string>(); // one run at a time per project
 
 /**
  * Turn the requested file list into workspace-relative paths for the hurl CLI
@@ -126,15 +126,15 @@ let running = false;
  * workspace is rejected; with no explicit list, every *.hurl/*.http under
  * tests/ is used recursively (hurl does not accept bare directories).
  */
-function expandTestFiles(files?: string[]): string[] {
+function expandTestFiles(p: Project, files?: string[]): string[] {
 	if (files && files.length) {
 		return files.map((f) => {
-			const abs = resolve(config.workspace, f);
-			if (!abs.startsWith(config.workspace + "/")) {
+			const abs = resolve(p.dir, f);
+			if (!abs.startsWith(p.dir + "/")) {
 				throw new Error(`test file outside the workspace: ${f}`);
 			}
 			if (!/\.(hurl|http)$/.test(abs)) throw new Error(`not a hurl file: ${f}`);
-			return abs.slice(config.workspace.length + 1);
+			return abs.slice(p.dir.length + 1);
 		});
 	}
 	const out: string[] = [];
@@ -145,16 +145,16 @@ function expandTestFiles(files?: string[]): string[] {
 			else if (/\.(hurl|http)$/.test(e.name)) out.push(`${prefix}${e.name}`);
 		}
 	};
-	walk(join(config.workspace, "tests"), "tests/");
+	walk(join(p.dir, "tests"), "tests/");
 	return out;
 }
 
-function runHurl(args: string[]): Promise<{ code: number; stderr: string }> {
+function runHurl(p: Project, args: string[]): Promise<{ code: number; stderr: string }> {
 	return new Promise((resolvePromise, reject) => {
 		// cwd matters: workspace-relative test paths only resolve from the
 		// workspace root. Without it hurl would look in the server's own dir.
 		const proc = spawn("hurl", args, {
-			cwd: config.workspace,
+			cwd: p.dir,
 			stdio: ["ignore", "ignore", "pipe"],
 			// hurl may read files named in a test: run it as the agent user, with a clean environment
 			env: agentEnv(),
@@ -252,10 +252,10 @@ function normalizeEntry(raw: RawEntry, src: string[], jsonDir: string): EntryRes
 	};
 }
 
-function normalizeFile(path: string, raw: RawFile | undefined, stderr: string, jsonDir: string): FileResult {
+function normalizeFile(p: Project, path: string, raw: RawFile | undefined, stderr: string, jsonDir: string): FileResult {
 	let src: string[] = [];
 	try {
-		src = readFileSync(join(config.workspace, path), "utf8").split("\n");
+		src = readFileSync(join(p.dir, path), "utf8").split("\n");
 	} catch {
 		/* unreadable source: asserts fall back to "line N" */
 	}
@@ -319,26 +319,26 @@ function readRawReport(jsonDir: string): Map<string, RawFile> {
 	}
 }
 
-function pruneHistory(): void {
-	const dirs = runDirs();
-	for (const d of dirs.slice(MAX_HISTORY)) rmSync(join(config.reportDir, String(d)), { recursive: true, force: true });
+function pruneHistory(p: Project): void {
+	const dirs = runDirs(p);
+	for (const d of dirs.slice(MAX_HISTORY)) rmSync(join(p.reportDir, String(d)), { recursive: true, force: true });
 }
 
 /** Run ids (directory names), newest first. */
-function runDirs(): number[] {
-	if (!existsSync(config.reportDir)) return [];
-	return readdirSync(config.reportDir)
+function runDirs(p: Project): number[] {
+	if (!existsSync(p.reportDir)) return [];
+	return readdirSync(p.reportDir)
 		.filter((e) => /^\d+$/.test(e))
 		.map(Number)
 		.sort((a, b) => b - a);
 }
 
 /** Normalized results of past runs, newest first. */
-export function listHistory(): RunResult[] {
+export function listHistory(p: Project): RunResult[] {
 	const out: RunResult[] = [];
-	for (const id of runDirs()) {
+	for (const id of runDirs(p)) {
 		try {
-			out.push(JSON.parse(readFileSync(join(config.reportDir, String(id), "result.json"), "utf8")) as RunResult);
+			out.push(withProjectUrls(p, JSON.parse(readFileSync(join(p.reportDir, String(id), "result.json"), "utf8")) as RunResult));
 		} catch {
 			/* incomplete run directory */
 		}
@@ -346,23 +346,30 @@ export function listHistory(): RunResult[] {
 	return out;
 }
 
+// Report URLs name the project: /report/<project>/<run>/... (results written before projects
+// existed point at /report/<run>/..., which the server still serves for the default project).
+function withProjectUrls(p: Project, r: RunResult): RunResult {
+	const fix = (u?: string): string | undefined => (u ? u.replace(/^\/report\/(\d+)\//, `/report/${p.id}/$1/`) : u);
+	return { ...r, jsonFile: fix(r.jsonFile), htmlFile: fix(r.htmlFile), junitFile: fix(r.junitFile) };
+}
+
 /**
- * Run the given Hurl files and return a normalized result.
+ * Run the given Hurl files of a project and return a normalized result.
  */
-export async function runTests(opts: RunOptions = {}): Promise<RunResult> {
-	if (running) throw new Error("a run is already in progress");
+export async function runTests(p: Project, opts: RunOptions = {}): Promise<RunResult> {
+	if (running.has(p.id)) throw new Error("a run is already in progress");
 	const host = typeof opts.host === "string" ? opts.host.trim() : "";
 	const variables = (opts.variables ?? []).filter(
 		(v): v is string => typeof v === "string" && /^[A-Za-z_][\w-]*=/.test(v),
 	);
-	const files = expandTestFiles(opts.files);
+	const files = expandTestFiles(p, opts.files);
 	if (!files.length) throw new Error("no test files to run");
 
-	running = true;
+	running.add(p.id);
 	try {
 		const started = Date.now();
 		const id = started;
-		const dir = join(config.reportDir, String(id));
+		const dir = join(p.reportDir, String(id));
 		const jsonDir = join(dir, "json");
 		const htmlDir = join(dir, "html");
 		const junit = join(dir, "junit.xml");
@@ -374,7 +381,7 @@ export async function runTests(opts: RunOptions = {}): Promise<RunResult> {
 
 		const stderrByFile = new Map<string, string>();
 		for (const f of files) {
-			const { stderr } = await runHurl([
+			const { stderr } = await runHurl(p, [
 				"--test", "--no-color", "--connect-timeout", "10", "--max-time", "60",
 				...varArgs,
 				"--report-json", jsonDir, "--report-html", htmlDir, "--report-junit", junit,
@@ -387,7 +394,7 @@ export async function runTests(opts: RunOptions = {}): Promise<RunResult> {
 		const result: RunResult = {
 			id,
 			at: started,
-			files: files.map((f) => normalizeFile(f, raw.get(f), stderrByFile.get(f) ?? "", jsonDir)),
+			files: files.map((f) => normalizeFile(p, f, raw.get(f), stderrByFile.get(f) ?? "", jsonDir)),
 			// Variables other than host may carry tokens; keep their values out of the
 			// command shown in the UI and stored in history.
 			command: [
@@ -397,18 +404,18 @@ export async function runTests(opts: RunOptions = {}): Promise<RunResult> {
 			].join(" "),
 			...(host ? { host } : {}),
 			duration: Date.now() - started,
-			...(existsSync(join(jsonDir, "report.json")) ? { jsonFile: `/report/${id}/json/report.json` } : {}),
-			...(existsSync(join(htmlDir, "index.html")) ? { htmlFile: `/report/${id}/html/index.html` } : {}),
-			...(existsSync(junit) ? { junitFile: `/report/${id}/junit.xml` } : {}),
+			...(existsSync(join(jsonDir, "report.json")) ? { jsonFile: `/report/${p.id}/${id}/json/report.json` } : {}),
+			...(existsSync(join(htmlDir, "index.html")) ? { htmlFile: `/report/${p.id}/${id}/html/index.html` } : {}),
+			...(existsSync(junit) ? { junitFile: `/report/${p.id}/${id}/junit.xml` } : {}),
 		};
 		writeAgentFile(join(dir, "result.json"), JSON.stringify(result, null, 2));
 		log("info", "run.done", {
-			id, files: result.files.length, failed: result.files.filter((f) => f.status === "fail").length,
+			project: p.id, id, files: result.files.length, failed: result.files.filter((f) => f.status === "fail").length,
 			ms: result.duration, host: host || undefined,
 		});
-		pruneHistory();
+		pruneHistory(p);
 		return result;
 	} finally {
-		running = false;
+		running.delete(p.id);
 	}
 }

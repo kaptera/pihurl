@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeAgentFile } from "./agent.js";
-import { config, loadTemplates, saveTemplates, type PromptTemplate } from "./config.js";
+import { loadTemplates, saveTemplates, type PromptTemplate } from "./config.js";
+import type { Project } from "./projects.js";
 
 /**
  * First-boot content for the workspace volume: the agent's standing
@@ -412,8 +413,6 @@ List every operation without a test, then every operation that only has a happy-
 // edited them: a file is "untouched" if it still has the content we last wrote (we
 // remember its hash in <state>/defaults.json) or is one of the builds shipped before
 // that record existed (LEGACY).
-const RECORD = join(config.stateDir, "defaults.json");
-
 const LEGACY: Record<string, string[]> = {
 	agents: ["2cc3a189f86ceac0"],
 	"skill:hurl-syntax": ["90ef0304759e6963"],
@@ -425,9 +424,9 @@ const LEGACY: Record<string, string[]> = {
 
 const hash = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
-function readRecord(): Record<string, string> {
+function readRecord(p: Project): Record<string, string> {
 	try {
-		return JSON.parse(readFileSync(RECORD, "utf8")) as Record<string, string>;
+		return JSON.parse(readFileSync(p.defaultsPath, "utf8")) as Record<string, string>;
 	} catch {
 		return {};
 	}
@@ -450,14 +449,14 @@ function manage(rec: Record<string, string>, key: string, path: string, content:
 	return true;
 }
 
-export function seedDefaults(): void {
-	const rec = readRecord();
-	manage(rec, "agents", config.instructionsPath, DEFAULT_AGENTS_MD);
-	manage(rec, "skill:hurl-syntax", join(config.agentDir, "skills", "hurl-syntax", "SKILL.md"), HURL_SKILL_MD);
-	manage(rec, "skill:openapi-spec", join(config.agentDir, "skills", "openapi-spec", "SKILL.md"), OPENAPI_SKILL_MD);
+export function seedDefaults(p: Project): void {
+	const rec = readRecord(p);
+	manage(rec, "agents", p.instructionsPath, DEFAULT_AGENTS_MD);
+	manage(rec, "skill:hurl-syntax", join(p.agentDir, "skills", "hurl-syntax", "SKILL.md"), HURL_SKILL_MD);
+	manage(rec, "skill:openapi-spec", join(p.agentDir, "skills", "openapi-spec", "SKILL.md"), OPENAPI_SKILL_MD);
 
 	// Templates: add the built-in ones that are missing, update untouched ones.
-	const current = loadTemplates();
+	const current = loadTemplates(p);
 	const byId = new Map(current.map((t) => [t.id, t]));
 	let changed = false;
 	for (const t of TEMPLATES) {
@@ -478,8 +477,8 @@ export function seedDefaults(): void {
 			} // else: edited by the user, keep theirs
 		}
 	}
-	if (changed || !existsSync(config.templatesPath)) saveTemplates(current);
+	if (changed || !existsSync(p.templatesPath)) saveTemplates(p, current);
 
-	mkdirSync(config.stateDir, { recursive: true });
-	writeFileSync(RECORD, JSON.stringify(rec, null, 2));
+	mkdirSync(p.stateDir, { recursive: true });
+	writeFileSync(p.defaultsPath, JSON.stringify(rec, null, 2));
 }

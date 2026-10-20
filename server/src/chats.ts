@@ -2,20 +2,21 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mkdirAgent } from "./agent.js";
-import { config } from "./config.js";
+import type { Project } from "./projects.js";
 
 /**
- * Chats.
+ * Chats of a project.
  *
  * A chat is a pi session. Its id is handed to pi as `--session-id`, and pi keeps the
- * transcript in <agentDir>/sessions/<timestamp>_<id>.jsonl, so a chat survives agent
- * restarts (provider change, crash) and container restarts.
+ * transcript in <project>/.pi/sessions/<timestamp>_<id>.jsonl, so a chat survives agent
+ * restarts (provider change, crash, idle shutdown) and container restarts.
  *
- * <state>/chats.json is only an index for the UI — the current chat, titles and
- * timestamps. Sessions found on disk that the index does not know (older builds, a
- * copied volume) are imported, so the sessions folder stays the source of truth.
- * A chat nobody has written to yet is not listed and not kept: "new chat" twice
- * in a row reuses the empty one.
+ * <project state>/chats.json is only an index for the UI (titles and timestamps). Sessions found
+ * on disk that the index does not know (older builds, a copied volume) are imported, so the
+ * sessions folder stays the source of truth. A chat nobody has written to yet is not listed.
+ *
+ * There is no "current" chat on the server: each browser tab says which chat it works on, and
+ * several chats can run at the same time (agents.ts).
  */
 
 export interface ChatInfo {
@@ -26,26 +27,28 @@ export interface ChatInfo {
 }
 
 interface Index {
-	current: string;
 	chats: ChatInfo[];
 }
 
-const INDEX_FILE = join(config.stateDir, "chats.json");
-const LEGACY_FILE = join(config.stateDir, "chat.json");
-
-export const sessionsDir = join(config.agentDir, "sessions");
-
-const ID_RE = /^[A-Za-z0-9][\w.-]*[A-Za-z0-9]$/;
+const ID_RE = /^chat-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const TITLE_MAX = 60;
 
-export function ensureSessionsDir(): void {
-	mkdirAgent(sessionsDir);
+export function validChatId(id: unknown): id is string {
+	return typeof id === "string" && ID_RE.test(id);
 }
 
-function sessionFile(id: string): string | undefined {
+export function newChatId(): string {
+	return `chat-${randomUUID()}`;
+}
+
+export function ensureSessionsDir(p: Project): void {
+	mkdirAgent(p.sessionsDir);
+}
+
+function sessionFile(p: Project, id: string): string | undefined {
 	try {
-		const f = readdirSync(sessionsDir).find((n) => n.endsWith(`_${id}.jsonl`));
-		return f ? join(sessionsDir, f) : undefined;
+		const f = readdirSync(p.sessionsDir).find((n) => n.endsWith(`_${id}.jsonl`));
+		return f ? join(p.sessionsDir, f) : undefined;
 	} catch {
 		return undefined;
 	}
@@ -79,137 +82,85 @@ function firstUserText(file: string): string {
 	}
 }
 
-function load(): Index {
-	let idx: Index;
+function load(p: Project): Index {
+	let idx: Index = { chats: [] };
 	try {
-		idx = JSON.parse(readFileSync(INDEX_FILE, "utf8")) as Index;
-		if (!Array.isArray(idx.chats)) throw new Error("bad index");
+		const raw = JSON.parse(readFileSync(p.chatsPath, "utf8")) as Partial<Index>;
+		if (Array.isArray(raw.chats)) idx = { chats: raw.chats.filter((c) => validChatId(c?.id)) };
 	} catch {
-		idx = { current: "", chats: [] };
-		try {
-			// Builds before the chat list kept only the current id.
-			const legacy = (JSON.parse(readFileSync(LEGACY_FILE, "utf8")) as { id?: string }).id;
-			if (legacy && ID_RE.test(legacy)) idx.current = legacy;
-		} catch {
-			/* first run */
-		}
+		/* first start */
 	}
 
 	// Import sessions on disk that the index does not know.
 	try {
 		const known = new Set(idx.chats.map((c) => c.id));
-		for (const name of readdirSync(sessionsDir)) {
-			const m = name.match(/^(.*)_([A-Za-z0-9][\w.-]*[A-Za-z0-9])\.jsonl$/);
-			if (!m || known.has(m[2])) continue;
-			const file = join(sessionsDir, name);
+		for (const name of readdirSync(p.sessionsDir)) {
+			const m = name.match(/^(.*)_(chat-[0-9a-f-]+)\.jsonl$/);
+			if (!m || !validChatId(m[2]) || known.has(m[2])) continue;
+			const file = join(p.sessionsDir, name);
 			const title = oneLine(firstUserText(file));
-			if (!title && m[2] !== idx.current) continue; // never written to
+			if (!title) continue; // never written to
 			const st = statSync(file);
 			idx.chats.push({ id: m[2], title, createdAt: st.birthtimeMs || st.mtimeMs, updatedAt: st.mtimeMs });
 		}
 	} catch {
 		/* no sessions folder yet */
 	}
-
-	if (!idx.current || !ID_RE.test(idx.current)) idx.current = newestId(idx) ?? "";
-	if (!idx.current) {
-		const now = Date.now();
-		idx.current = `chat-${randomUUID()}`;
-		idx.chats.push({ id: idx.current, title: "", createdAt: now, updatedAt: now });
-	}
-	if (!idx.chats.some((c) => c.id === idx.current)) {
-		const now = Date.now();
-		idx.chats.push({ id: idx.current, title: "", createdAt: now, updatedAt: now });
-	}
 	return idx;
 }
 
-function newestId(idx: Index): string | undefined {
-	return [...idx.chats].filter((c) => c.title).sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id;
+function save(p: Project, idx: Index): void {
+	mkdirSync(p.stateDir, { recursive: true });
+	writeFileSync(p.chatsPath, JSON.stringify(idx, null, 2));
 }
 
-function save(idx: Index): void {
-	mkdirSync(config.stateDir, { recursive: true });
-	writeFileSync(INDEX_FILE, JSON.stringify(idx, null, 2));
+/** Chats to show, newest first. */
+export function listChats(p: Project): ChatInfo[] {
+	const idx = load(p);
+	save(p, idx);
+	return [...idx.chats].filter((c) => c.title).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-/** Forget `id` if nothing was ever written to it. */
-function dropIfEmpty(idx: Index, id: string): void {
-	const c = idx.chats.find((x) => x.id === id);
-	if (c && !c.title && !sessionFile(id)) idx.chats = idx.chats.filter((x) => x.id !== id);
+export function chatExists(p: Project, id: string): boolean {
+	return load(p).chats.some((c) => c.id === id) || !!sessionFile(p, id);
 }
 
-export function currentChatId(): string {
-	const idx = load();
-	save(idx);
-	return idx.current;
-}
-
-/** Chats to show, newest first. The current one is always listed, even when empty. */
-export function listChats(): { current: string; chats: ChatInfo[] } {
-	const idx = load();
-	save(idx);
-	const chats = idx.chats
-		.filter((c) => c.title || c.id === idx.current)
-		.sort((a, b) => b.updatedAt - a.updatedAt);
-	return { current: idx.current, chats };
-}
-
-/** Start a fresh conversation (or stay in the current one if it is still empty). */
-export function newChat(): string {
-	const idx = load();
-	const cur = idx.chats.find((c) => c.id === idx.current);
-	if (cur && !cur.title) return idx.current;
-	const now = Date.now();
-	const id = `chat-${randomUUID()}`;
-	idx.chats.push({ id, title: "", createdAt: now, updatedAt: now });
-	idx.current = id;
-	save(idx);
-	return id;
-}
-
-export function switchChat(id: string): boolean {
-	const idx = load();
-	if (!idx.chats.some((c) => c.id === id)) return false;
-	if (idx.current !== id) {
-		const prev = idx.current;
-		idx.current = id;
-		dropIfEmpty(idx, prev);
-	}
-	save(idx);
-	return true;
-}
-
-export function renameChat(id: string, title: string): boolean {
-	const idx = load();
+export function renameChat(p: Project, id: string, title: string): boolean {
+	const idx = load(p);
 	const c = idx.chats.find((x) => x.id === id);
 	const t = oneLine(title);
 	if (!c || !t) return false;
 	c.title = t;
-	save(idx);
+	save(p, idx);
 	return true;
 }
 
-/** Delete a chat and its transcript. Returns the id that is current afterwards. */
-export function deleteChat(id: string): string {
-	const idx = load();
-	const file = sessionFile(id);
+/** Delete a chat and its transcript. Stop its agent first (the agent holds the file open). */
+export function deleteChat(p: Project, id: string): boolean {
+	const idx = load(p);
+	const file = sessionFile(p, id);
+	const known = idx.chats.some((c) => c.id === id);
+	if (!known && !file) return false;
 	if (file) rmSync(file, { force: true });
 	idx.chats = idx.chats.filter((c) => c.id !== id);
-	if (idx.current === id) idx.current = newestId(idx) ?? "";
-	save(idx);
-	// If that was the last chat, load() starts an empty one.
-	const after = load();
-	save(after);
-	return after.current;
+	save(p, idx);
+	return true;
 }
 
-/** The user wrote to this chat: name it after the first prompt, bump its time. */
-export function touchChat(id: string, text?: string): void {
-	const idx = load();
-	const c = idx.chats.find((x) => x.id === id);
-	if (!c) return;
+/** The user wrote to this chat: create its entry on the first prompt, name it, bump its time. */
+export function touchChat(p: Project, id: string, text?: string): void {
+	const idx = load(p);
+	let c = idx.chats.find((x) => x.id === id);
+	if (!c) {
+		const now = Date.now();
+		c = { id, title: "", createdAt: now, updatedAt: now };
+		idx.chats.push(c);
+	}
 	if (!c.title && text) c.title = oneLine(text);
 	c.updatedAt = Date.now();
-	save(idx);
+	save(p, idx);
+}
+
+export function sessionExists(p: Project, id: string): boolean {
+	return existsSync(p.sessionsDir) && !!sessionFile(p, id);
 }

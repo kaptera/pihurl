@@ -11,6 +11,7 @@
 <div class="app">
   <aside class="side">
     <div class="brand"><div class="logo">π</div><div><b>pihurl</b><small>self-hosted · v0.1</small></div></div>
+    <button class="proj" id="projBtn" data-act="projMenu" aria-haspopup="true" title="Switch project"></button>
     <nav class="nav" id="nav"></nav>
     <div class="side-foot">
       <button class="mini" data-act="go" data-v="providers"><div class="l">LLM</div><div class="v" id="sfProv"></div></button>
@@ -20,6 +21,7 @@
   <div class="main">
     <div class="topbar">
       <div class="brand"><div class="logo">π</div><b>pihurl</b></div>
+      <button class="chip" data-act="projMenu" id="tbProj" aria-haspopup="true" title="Switch project"></button>
       <button class="chip" data-act="go" data-v="providers" id="tbProv"></button>
     </div>
 
@@ -107,6 +109,7 @@
     <button class="btn primary" type="submit">Sign in</button>
   </form>
 </div>
+<div class="cmenu pmenu" id="projMenu" role="menu" hidden></div>
 <div class="toast" id="toast"></div>
 
 <script src="markdown.js"></script>

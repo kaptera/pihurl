@@ -24,9 +24,10 @@ const { bootLayout } = await import("../dist/boot.js");
 test("state files move out of the workspace once; the agent's files stay", () => {
 	bootLayout();
 	assert.equal(readFileSync(join(state, "providers.json"), "utf8"), '[{"id":"p"}]');
-	assert.equal(readFileSync(join(state, "chats.json"), "utf8"), '{"current":"c"}');
+	assert.equal(readFileSync(join(state, "projects", "default", "chats.json"), "utf8"), '{"current":"c"}');
 	assert.equal(readFileSync(join(state, "logs", "pihurl.log"), "utf8").startsWith("old log"), true);
 	for (const n of ["providers.json", "chats.json", "logs"]) assert.equal(existsSync(join(ws, n)), false, n);
+	assert.equal(existsSync(join(state, "chats.json")), false); // per-project files live under projects/default
 	assert.equal(existsSync(join(ws, "tests", "a.hurl")), true);
 
 	// a second start changes nothing, and never overwrites newer state
@@ -34,4 +35,27 @@ test("state files move out of the workspace once; the agent's files stay", () =>
 	writeFileSync(join(ws, "providers.json"), '[{"id":"stale copy"}]');
 	bootLayout();
 	assert.equal(readFileSync(join(state, "providers.json"), "utf8"), '[{"id":"newer"}]');
+});
+
+test("an install from before projects (state in the state root) moves its per-project files", async () => {
+	const root2 = mkdtempSync(join(tmpdir(), "pihurl-boot2-"));
+	process.env.PIHURL_STATE = join(root2, "state");
+	process.env.WORKSPACE = join(root2, "ws");
+	mkdirSync(process.env.PIHURL_STATE, { recursive: true });
+	mkdirSync(process.env.WORKSPACE, { recursive: true });
+	for (const [n, c] of [["providers.json", "[]"], ["chats.json", '{"chats":[]}'], ["hosts.json", "[]"], ["defaults.json", "{}"]]) {
+		writeFileSync(join(process.env.PIHURL_STATE, n), c);
+	}
+	// config.ts reads the environment once, so a second layout needs a fresh process
+	const { spawnSync } = await import("node:child_process");
+	const r = spawnSync(process.execPath, ["--input-type=module", "-e", `
+		const { bootLayout } = await import(${JSON.stringify(new URL("../dist/boot.js", import.meta.url).href)});
+		bootLayout();`], { env: { ...process.env, PIHURL_AGENT_UID: "" }, encoding: "utf8" });
+	assert.equal(r.status, 0, r.stderr);
+	const st = process.env.PIHURL_STATE;
+	assert.equal(existsSync(join(st, "providers.json")), true);
+	for (const n of ["chats.json", "hosts.json", "defaults.json"]) {
+		assert.equal(existsSync(join(st, n)), false, `${n} left in the state root`);
+		assert.equal(existsSync(join(st, "projects", "default", n)), true, n);
+	}
 });

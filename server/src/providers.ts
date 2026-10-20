@@ -1,4 +1,5 @@
 import { config, loadProviders, saveModels, type ModelsFile, type ProviderConfig } from "./config.js";
+import { listProjects, type Project } from "./projects.js";
 
 /**
  * Providers as pi sees them.
@@ -55,8 +56,8 @@ export function providerByKey(key: string): ProviderConfig | undefined {
 	return list.find((p) => modelsKeyFor(p, list) === key);
 }
 
-// Rebuild the models.json from the provider list. Called after any save/delete and at boot.
-export function syncModelsFromProviders(list: ProviderConfig[]): void {
+// Rebuild the models.json of a project from the provider list. Called before an agent starts.
+export function syncModelsFromProviders(project: Project, list: ProviderConfig[]): void {
 	const models: ModelsFile = {};
 	for (const p of list) {
 		if (!p.baseUrl || !p.model) continue;
@@ -69,11 +70,12 @@ export function syncModelsFromProviders(list: ProviderConfig[]): void {
 			models: [{ id: p.model }],
 		};
 	}
-	saveModels(models);
+	saveModels(project, models);
 }
 
-// Run once at boot so models.json reflects the current provider list even if it
-// was never saved through the API (e.g. a hand-edited providers.json).
+// Run once at boot so every project's models.json reflects the current provider list even if
+// it was never saved through the API (e.g. a hand-edited providers.json).
 export function syncModelsAtBoot(): void {
-	syncModelsFromProviders(loadProviders());
+	const list = loadProviders();
+	for (const project of listProjects()) syncModelsFromProviders(project, list);
 }

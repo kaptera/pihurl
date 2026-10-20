@@ -4,20 +4,22 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { Hono } from "hono";
 import {
-	activeProvider, config, loadHosts, loadInstructions, loadProviders, loadTemplates,
-	saveHosts, saveInstructions, saveModels, saveProviders, saveTemplates,
-	type HostConfig, type ModelsFile, type PromptTemplate, type ProviderConfig,
+	config, loadHosts, loadInstructions, loadProviders, loadTemplates,
+	saveHosts, saveInstructions, saveProviders, saveTemplates,
+	type HostConfig, type PromptTemplate, type ProviderConfig,
 } from "./config.js";
+import { AgentLimitError, pool } from "./agents.js";
+import { deleteChat, listChats, newChatId, renameChat, validChatId } from "./chats.js";
+import { seedDefaults } from "./defaults.js";
+import { log, logFile } from "./log.js";
+import { writeAgentFile } from "./agent.js";
 import {
-	currentChatId, deleteChat, ensureSessionsDir, listChats, newChat, renameChat, sessionsDir, switchChat, touchChat,
-} from "./chats.js";
-import { clip, log, logFile } from "./log.js";
-import { agentEnv, spawnIdentity, writeAgentFile } from "./agent.js";
+	DEFAULT_ID, createProject, deleteProject, getProject, listProjects, renameProject, type Project,
+} from "./projects.js";
 import {
 	authEnabled, clearedCookie, clearLoginFailures, guard, isAuthenticated, loginAllowed, recordLoginFailure, sessionCookie, tokenMatches,
 } from "./security.js";
-import { PiRpcClient, type PiEvent, type PiExit } from "./pi.js";
-import { modelsKeyFor, providerArgs, syncModelsAtBoot, syncModelsFromProviders } from "./providers.js";
+import { syncModelsFromProviders } from "./providers.js";
 import { listHistory, runTests } from "./run.js";
 import { deleteSpec, listSpecs, saveSpec } from "./specs.js";
 import { listTestFiles, testFilesExist } from "./testfiles.js";
@@ -48,7 +50,9 @@ import { listTestFiles, testFilesExist } from "./testfiles.js";
  *  GET  /*                   web-ui static assets
  */
 
-export const app = new Hono();
+type Env = { Variables: { project: Project } };
+
+export const app = new Hono<Env>();
 
 // Host, origin and access-token checks come first (security.ts). The streaming chat endpoint is
 // served outside Hono and runs the same guard in server.ts.
@@ -95,167 +99,114 @@ app.use("/api/*", async (c, next) => {
 	log(level, "http", { method: c.req.method, path: c.req.path, status: c.res.status, ms: Date.now() - t0 });
 });
 
-// ---- agent process ----------------------------------------------------------
-
-let piClient: PiRpcClient | null = null;
-
-// Drop the running agent so a provider change takes effect on the next prompt.
-function restartPi(): void {
-	const client = piClient;
-	piClient = null;
-	void client?.shutdown();
-}
-
-// Same, but wait until it is gone (a chat switch must not race the old process).
-async function dropAgent(): Promise<void> {
-	const client = piClient;
-	piClient = null;
-	await client?.shutdown();
-}
-
-function ensurePi(): PiRpcClient {
-	if (!piClient?.isRunning()) {
-		const provider = activeProvider();
-		const chatId = currentChatId();
-		ensureSessionsDir();
-		const client = new PiRpcClient({
-			cliPath: config.piCliPath,
-			nodeBin: config.nodeBin,
-			// pi treats its cwd as the project: AGENTS.md, tests/, hurl.env.
-			cwd: config.workspace,
-			args: [
-				...(provider ? providerArgs(provider, loadProviders()) : []),
-				// The transcript lives in the volume: it outlives agent and container restarts.
-				"--session-id", chatId, "--session-dir", sessionsDir,
-			],
-			// Keep models.json and skills in the workspace volume instead of ~/.pi/agent. The agent's
-			// environment is a clean one: no access token, no provider keys (those stay in the server).
-			env: agentEnv({ PI_CODING_AGENT_DIR: config.agentDir, PIHURL_INTERNAL_URL: config.internalUrl }),
-			...spawnIdentity(),
-		});
-		log("info", "agent.start", { chat: chatId, provider: provider?.name ?? null, model: provider?.model ?? null });
-		attachAgentLog(client);
-		piClient = client;
-	}
-	return piClient;
-}
-
-// What the agent did, in the app log: prompts, model replies, tool calls, errors.
-// Together with pi's own session file this is enough to reconstruct a chat.
-function attachAgentLog(client: PiRpcClient): void {
-	const started = new Map<string, number>();
-	client.on("event", (e: PiEvent) => {
-		switch (e.type) {
-			case "agent_start":
-				return log("info", "agent.run.start");
-			case "agent_settled":
-				return log("info", "agent.run.settled");
-			case "message_end": {
-				const m = e.message as { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number } } | undefined;
-				if (m?.role === "user") {
-					const text = typeof m.content === "string" ? m.content : (m.content as { text?: string }[] | undefined)?.map((c) => c.text ?? "").join("");
-					return log("info", "chat.user", { text: clip(text, 600) });
-				}
-				if (m?.role === "assistant") {
-					const blocks = (m.content as { type: string; text?: string; name?: string }[] | undefined) ?? [];
-					const text = blocks.filter((b) => b.type === "text").map((b) => b.text).join("");
-					const calls = blocks.filter((b) => b.type === "toolCall").map((b) => b.name);
-					return log(m.stopReason === "error" ? "error" : "info", "chat.assistant", {
-						stop: m.stopReason, ...(m.errorMessage ? { error: m.errorMessage } : {}),
-						tokens_in: m.usage?.input, tokens_out: m.usage?.output,
-						...(calls.length ? { tools: calls } : {}), text: clip(text, 600),
-					});
-				}
-				return;
-			}
-			case "tool_execution_start":
-				started.set(String(e.toolCallId), Date.now());
-				return log("info", "tool.start", { id: e.toolCallId, tool: e.toolName, args: clip(e.args, 500) });
-			case "tool_execution_end": {
-				const out = ((e.result as { content?: { text?: string }[] } | undefined)?.content ?? []).map((c) => c.text ?? "").join("");
-				const t0 = started.get(String(e.toolCallId));
-				started.delete(String(e.toolCallId));
-				return log(e.isError ? "warn" : "info", "tool.end", {
-					id: e.toolCallId, tool: e.toolName, error: !!e.isError, ms: t0 ? Date.now() - t0 : undefined, output: clip(out, 500),
-				});
-			}
-			case "auto_retry_start":
-				return log("warn", "agent.retry", { attempt: e.attempt, max: e.maxAttempts, error: e.errorMessage });
-			case "auto_retry_end":
-				return log(e.success ? "info" : "error", "agent.retry.end", { success: e.success, error: e.finalError });
-		}
-	});
-	client.on("closed", (x: PiExit) =>
-		log(x.intentional ? "info" : "error", "agent.exit", { code: x.code, signal: x.signal, intentional: x.intentional }));
-	client.on("spawn_error", (err: Error) => log("error", "agent.spawn_error", { error: err.message }));
-}
-
-// Is the agent mid-turn? The UI asks this on load so its seed message is
-// routed as a steer (queued into the running turn) instead of a plain prompt,
-// which pi rejects outright while streaming. Never spawns pi by itself.
-app.get("/api/chat/state", async (c) => {
-	if (!piClient?.isRunning()) return c.json({ running: false, started: false });
-	try {
-		const st = (await piClient.getState()) as { data?: { isStreaming?: boolean } };
-		return c.json({ running: !!st?.data?.isStreaming, started: true });
-	} catch {
-		return c.json({ running: false, started: true });
-	}
+// Which project a request is about: the X-Pihurl-Project header (the browser), ?project= (the
+// streaming endpoint, links), else the default project (scripts, curl).
+app.use("/api/*", async (c, next) => {
+	const id = c.req.header("x-pihurl-project") ?? c.req.query("project") ?? "";
+	const project = getProject(id);
+	if (!project) return c.json({ error: "unknown_project", detail: `no project "${id}"` }, 404);
+	c.set("project", project);
+	await next();
 });
 
-// The current chat as the UI should redraw it after a reload: user, assistant
-// and tool-result messages of pi's session. Starts pi if needed (the session is
-// opened from disk), so a browser reload picks the conversation up again.
+// ---- projects -----------------------------------------------------------------
+
+app.get("/api/projects", (c) =>
+	c.json({ projects: listProjects().map((p) => ({ id: p.id, name: p.name })), default: DEFAULT_ID }));
+
+app.post("/api/projects", async (c) => {
+	const body = await c.req.json().catch(() => ({}));
+	const id = typeof body.id === "string" ? body.id : "";
+	let created: string | undefined;
+	switch (body.action) {
+		case "create": {
+			try {
+				const p = createProject(typeof body.name === "string" ? body.name : "");
+				seedDefaults(p);
+				syncModelsFromProviders(p, loadProviders());
+				created = p.id;
+				log("info", "project.create", { project: p.id, name: p.name });
+			} catch (err) {
+				return c.json({ error: "invalid_project", detail: err instanceof Error ? err.message : String(err) }, 400);
+			}
+			break;
+		}
+		case "rename":
+			if (!renameProject(id, typeof body.name === "string" ? body.name : "")) return c.json({ error: "not_found" }, 404);
+			log("info", "project.rename", { project: id });
+			break;
+		case "delete":
+			if (id === DEFAULT_ID) return c.json({ error: "default_project", detail: "the default project cannot be deleted" }, 400);
+			if (!getProject(id)) return c.json({ error: "not_found" }, 404);
+			// its agents hold files of the project open
+			await pool.shutdownProject(id);
+			deleteProject(id);
+			log("info", "project.delete", { project: id });
+			break;
+		default:
+			return c.json({ error: "unknown action" }, 400);
+	}
+	return c.json({ projects: listProjects().map((p) => ({ id: p.id, name: p.name })), default: DEFAULT_ID, ...(created ? { created } : {}) });
+});
+
+// ---- agents and chats ---------------------------------------------------------
+
+// Which chats of a project are working, e.g. for scripts. The browser learns it from the stream.
+app.get("/api/chat/state", (c) => {
+	const p = c.get("project");
+	const chat = c.req.query("chat") ?? "";
+	return c.json({ running: chat ? pool.isBusy(p.id, chat) : pool.running(p.id).length > 0, chats: pool.running(p.id) });
+});
+
+// The messages of a chat, as the UI should redraw them after a reload: user, assistant and
+// tool-result messages of pi's session. Starts the chat's agent if needed (the session is read
+// through it), so a browser reload picks the conversation up again.
 app.get("/api/chat/history", async (c) => {
+	const p = c.get("project");
+	const chat = c.req.query("chat") ?? "";
+	if (!validChatId(chat)) return c.json({ error: "invalid_chat" }, 400);
 	try {
-		const client = ensurePi();
-		await client.start();
-		const [msgs, st] = await Promise.all([client.getMessages(), client.getState()]);
-		const raw = ((msgs as { data?: { messages?: Record<string, unknown>[] } }).data?.messages) ?? [];
-		const messages = raw.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult").map(slimMessage);
-		const running = !!(st as { data?: { isStreaming?: boolean } }).data?.isStreaming;
-		return c.json({ chat: currentChatId(), running, messages });
+		const h = await pool.history(p, chat);
+		const messages = h.messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult").map(slimMessage);
+		return c.json({ chat, running: h.running, messages });
 	} catch (err) {
-		return c.json({ chat: currentChatId(), running: false, messages: [], error: err instanceof Error ? err.message : String(err) });
+		const limit = err instanceof AgentLimitError;
+		return c.json({ chat, running: false, messages: [], error: err instanceof Error ? err.message : String(err) }, limit ? 429 : 200);
 	}
 });
 
 // ---- chat list ----------------------------------------------------------------
 
-app.get("/api/chats", (c) => c.json(listChats()));
+app.get("/api/chats", (c) => {
+	const p = c.get("project");
+	return c.json({ chats: listChats(p).map((x) => ({ ...x, running: pool.isBusy(p.id, x.id) })) });
+});
 
 app.post("/api/chats", async (c) => {
+	const p = c.get("project");
 	const body = await c.req.json().catch(() => ({}));
 	const id = typeof body.id === "string" ? body.id : "";
-	const before = currentChatId();
+	let created: string | undefined;
 	switch (body.action) {
-		case "new": {
-			const chat = newChat();
-			if (chat !== before) await dropAgent();
-			log("info", "chat.new", { chat, reused: chat === before });
-			break;
-		}
-		case "switch":
-			if (!switchChat(id)) return c.json({ error: "not_found" }, 404);
-			if (id !== before) await dropAgent();
-			log("info", "chat.switch", { chat: id });
+		case "new":
+			// Only an id: the chat exists once something is written to it, and no agent starts before that.
+			created = newChatId();
 			break;
 		case "rename":
-			if (!renameChat(id, String(body.title ?? ""))) return c.json({ error: "not_found" }, 404);
-			log("info", "chat.rename", { chat: id });
+			if (!validChatId(id) || !renameChat(p, id, String(body.title ?? ""))) return c.json({ error: "not_found" }, 404);
+			log("info", "chat.rename", { project: p.id, chat: id });
 			break;
-		case "delete": {
-			if (!listChats().chats.some((x) => x.id === id)) return c.json({ error: "not_found" }, 404);
-			// The agent holds the file open (and would keep appending to it).
-			if (id === before) await dropAgent();
-			const now = deleteChat(id);
-			log("info", "chat.delete", { chat: id, current: now });
+		case "delete":
+			if (!validChatId(id)) return c.json({ error: "not_found" }, 404);
+			// The agent holds the session file open (and would keep appending to it).
+			await pool.shutdown(p.id, id);
+			if (!deleteChat(p, id)) return c.json({ error: "not_found" }, 404);
+			log("info", "chat.delete", { project: p.id, chat: id });
 			break;
-		}
 		default:
 			return c.json({ error: "unknown action" }, 400);
 	}
-	return c.json(listChats());
+	return c.json({ chats: listChats(p).map((x) => ({ ...x, running: pool.isBusy(p.id, x.id) })), ...(created ? { id: created } : {}) });
 });
 
 // Drop what the UI never shows (signatures, thinking, usage) and cap huge tool output.
@@ -273,12 +224,18 @@ function slimMessage(m: Record<string, unknown>): Record<string, unknown> {
 	};
 }
 
-// SSE bridge from pi events to the browser. Served raw on the node:http
-// listener (see server.ts): routing a long-lived Web ReadableStream through
-// @hono/node-server stalls the first stream after startup — events pile up
-// in its queue and never reach the browser. Raw res.write has no such issue.
+// SSE bridge from the agents of one project to the browser: every pi event of every chat, tagged
+// with its chat id, plus "pihurl_busy" when a chat starts or stops working and a "pihurl_running"
+// snapshot on connect. Served raw on the node:http listener (see server.ts): routing a long-lived Web
+// ReadableStream through @hono/node-server stalls the first stream after startup, while raw
+// res.write has no such issue. One stream per browser tab, no agent is started by connecting.
 export function chatSSEHandler(req: IncomingMessage, res: ServerResponse): void {
-	const client = ensurePi();
+	const url = new URL(req.url ?? "/", "http://localhost");
+	const project = getProject(url.searchParams.get("project") ?? "");
+	if (!project) {
+		res.writeHead(404, { "Content-Type": "application/json" });
+		return void res.end(JSON.stringify({ error: "unknown_project" }));
+	}
 	res.writeHead(200, {
 		"Content-Type": "text/event-stream",
 		"Cache-Control": "no-cache",
@@ -286,26 +243,17 @@ export function chatSSEHandler(req: IncomingMessage, res: ServerResponse): void 
 		"X-Accel-Buffering": "no",
 	});
 	res.write(":open\n\n");
+	log("info", "sse.open", { project: project.id });
 
-	log("info", "sse.open");
 	let done = false;
 	const send = (e: unknown): void => {
 		if (!done) res.write(`data: ${JSON.stringify(e)}\n\n`);
 	};
-	const onEvent = (e: PiEvent): void => send(e);
-	const onSpawnError = (err: Error): void => {
-		send({ type: "error", error: `could not start the agent: ${err.message}` });
-		send({ type: "agent_settled" });
+	const onEvent = (projectId: string, chat: string, rec: object): void => {
+		if (projectId === project.id) send({ ...rec, chat });
 	};
-	// The agent ended. If nobody asked for it, tell the browser, otherwise its
-	// turn would stay "busy" forever; then end the stream so the reader loop
-	// finishes and the next send() reconnects to the next agent.
-	const onClosed = (exit: PiExit): void => {
-		if (!exit.intentional) {
-			send({ type: "error", error: `agent exited unexpectedly (${exit.signal ?? `code ${exit.code}`})` });
-			send({ type: "agent_settled" });
-		}
-		teardown();
+	const onBusy = (projectId: string, chat: string, busy: boolean): void => {
+		if (projectId === project.id) send({ type: "pihurl_busy", chat, busy });
 	};
 	// Comment frames keep proxies from buffering and detect dead sockets.
 	const heartbeat = setInterval(() => {
@@ -314,20 +262,17 @@ export function chatSSEHandler(req: IncomingMessage, res: ServerResponse): void 
 	function teardown(): void {
 		if (done) return;
 		done = true;
-		log("info", "sse.close");
+		log("info", "sse.close", { project: project!.id });
 		clearInterval(heartbeat);
-		client.off("event", onEvent);
-		client.off("closed", onClosed);
-		client.off("spawn_error", onSpawnError);
+		pool.off("event", onEvent);
+		pool.off("busy", onBusy);
 		if (!res.writableEnded) res.end();
 	}
-
-	client.on("event", onEvent);
-	client.on("closed", onClosed);
-	client.on("spawn_error", onSpawnError);
+	pool.on("event", onEvent);
+	pool.on("busy", onBusy);
 	req.on("close", teardown);
 	res.on("error", teardown);
-	client.start().catch((err: unknown) => onSpawnError(err instanceof Error ? err : new Error(String(err))));
+	send({ type: "pihurl_running", chats: pool.running(project.id) });
 }
 
 // Never reached in practice (the http listener intercepts this path first);
@@ -335,48 +280,31 @@ export function chatSSEHandler(req: IncomingMessage, res: ServerResponse): void 
 app.get("/api/chat", (c) => c.json({ error: "SSE is served on the raw listener" }, 405));
 
 app.post("/api/chat", async (c) => {
+	const p = c.get("project");
 	const body = await c.req.json().catch(() => ({}));
+	const chat = body.chat;
+	if (!validChatId(chat)) return c.json({ error: "invalid_chat", detail: "a chat id is required" }, 400);
 	const kind = body.kind ?? "prompt";
 	const message = typeof body.message === "string" ? body.message : "";
 
-	// "stop" cancels the current run but keeps the agent and its context.
+	// "stop" cancels the current run of this chat but keeps its agent and context.
 	if (kind === "stop") {
-		if (!piClient?.isRunning()) return c.json({ success: true, data: { stopped: false } });
 		try {
-			return c.json(await piClient.abort());
+			return c.json(await pool.abort(p.id, chat));
 		} catch (err) {
 			return c.json({ success: false, error: err instanceof Error ? err.message : String(err) });
 		}
-	}
-	// "new" throws the agent away, and with it the conversation. Null the
-	// reference first so ensurePi() won't hand the dying client back out.
-	if (kind === "new") {
-		const before = currentChatId();
-		const chat = newChat();
-		if (chat !== before) await dropAgent();
-		log("info", "chat.new", { chat, reused: chat === before });
-		return c.json({ success: true, data: { stopped: true, chat } });
 	}
 
 	if (!message) return c.json({ error: "message required" }, 400);
 	if (kind !== "prompt" && kind !== "steer" && kind !== "follow_up") return c.json({ error: "unknown kind" }, 400);
 
-	let client: PiRpcClient;
-	try {
-		client = ensurePi();
-		await client.start();
-	} catch (err) {
-		return c.json({ error: "agent_unavailable", detail: err instanceof Error ? err.message : String(err) }, 503);
-	}
-
-	touchChat(currentChatId(), message);
 	let result: unknown;
 	try {
-		result = kind === "prompt" ? await client.prompt(message)
-			: kind === "steer" ? await client.steer(message)
-			: await client.followUp(message);
+		result = await pool.send(p, chat, kind, message);
 	} catch (err) {
-		return c.json({ error: "agent_unavailable", detail: err instanceof Error ? err.message : String(err) }, 503);
+		const limit = err instanceof AgentLimitError;
+		return c.json({ error: limit ? "too_many_agents" : "agent_unavailable", detail: err instanceof Error ? err.message : String(err) }, limit ? 429 : 503);
 	}
 	// pi answers every command with {type:"response", success, data|error}. A
 	// rejected prompt (e.g. "agent is already processing — use streamingBehavior")
@@ -392,14 +320,15 @@ app.post("/api/chat", async (c) => {
 
 // Both the user (upload) and the agent (it writes files into specs/) produce specs,
 // so the list is always read from disk.
-app.get("/api/specs", (c) => c.json({ specs: listSpecs() }));
+app.get("/api/specs", (c) => c.json({ specs: listSpecs(c.get("project")) }));
 
 app.post("/api/specs", async (c) => {
 	const body = await c.req.json().catch(() => ({}));
 	try {
-		const path = saveSpec(typeof body.name === "string" ? body.name : "openapi.yaml", typeof body.content === "string" ? body.content : "");
-		log("info", "spec.save", { path });
-		return c.json({ saved: path, specs: listSpecs() });
+		const p = c.get("project");
+		const path = saveSpec(p, typeof body.name === "string" ? body.name : "openapi.yaml", typeof body.content === "string" ? body.content : "");
+		log("info", "spec.save", { project: p.id, path });
+		return c.json({ saved: path, specs: listSpecs(p) });
 	} catch (err) {
 		return c.json({ error: "invalid_spec", detail: err instanceof Error ? err.message : String(err) }, 400);
 	}
@@ -407,9 +336,10 @@ app.post("/api/specs", async (c) => {
 
 app.delete("/api/specs", (c) => {
 	const path = c.req.query("path") ?? "";
-	if (!deleteSpec(path)) return c.json({ error: "not_found" }, 404);
-	log("info", "spec.delete", { path });
-	return c.json({ specs: listSpecs() });
+	const p = c.get("project");
+	if (!deleteSpec(p, path)) return c.json({ error: "not_found" }, 404);
+	log("info", "spec.delete", { project: p.id, path });
+	return c.json({ specs: listSpecs(p) });
 });
 
 // ---- providers --------------------------------------------------------------
@@ -476,11 +406,10 @@ app.post("/api/providers", async (c) => {
 	}
 
 	saveProviders(list);
-	syncModelsFromProviders(list);
 	log("info", "provider." + action, { id: body.id ?? savedId, name: list.find((p) => p.id === (body.id ?? savedId))?.name, active: list.find((p) => p.active)?.name });
 	// pi was started with the old provider's flags — restart it so the change
 	// takes effect on the next prompt.
-	restartPi();
+	pool.providerChanged();
 	return c.json({
 		providers: list.map(publicProvider),
 		// The saved provider for `save` (the UI reads its generated id); the
@@ -545,18 +474,19 @@ app.post("/api/providers/test", async (c) => {
 
 // The Hurl files live in the workspace and belong to the agent; the backend only
 // lists and runs them.
-app.get("/api/tests", (c) => c.json({ files: listTestFiles(), exists: testFilesExist() }));
+app.get("/api/tests", (c) => c.json({ files: listTestFiles(c.get("project")), exists: testFilesExist(c.get("project")) }));
 
-app.get("/api/run", (c) => c.json({ history: listHistory() }));
+app.get("/api/run", (c) => c.json({ history: listHistory(c.get("project")) }));
 
 app.post("/api/run", async (c) => {
+	const p = c.get("project");
 	const body = await c.req.json().catch(() => ({}));
 	// No host in the request (a script, curl): run against the current target, the same one the agent uses.
 	const given = typeof body.host === "string" ? body.host.trim() : "";
-	const host = given || loadHosts()[0]?.baseUrl || "";
-	if (given) rememberHost(given);
+	const host = given || loadHosts(p)[0]?.baseUrl || "";
+	if (given) rememberHost(p, given);
 	try {
-		const result = await runTests({
+		const result = await runTests(p, {
 			host,
 			variables: Array.isArray(body.variables) ? body.variables : [],
 			files: Array.isArray(body.files) && body.files.length ? body.files : undefined,
@@ -571,45 +501,47 @@ app.post("/api/run", async (c) => {
 // ---- prompts & hosts --------------------------------------------------------
 
 app.get("/api/prompts", (c) =>
-	c.json({ templates: loadTemplates(), instructions: loadInstructions() }));
+	c.json({ templates: loadTemplates(c.get("project")), instructions: loadInstructions(c.get("project")) }));
 
 app.post("/api/prompts", async (c) => {
+	const p = c.get("project");
 	const body = await c.req.json().catch(() => ({}));
 	if (Array.isArray(body.templates)) {
 		const ok = (body.templates as PromptTemplate[]).every(
 			(t) => t && typeof t.id === "string" && typeof t.name === "string" && typeof t.body === "string",
 		);
 		if (!ok) return c.json({ error: "invalid templates" }, 400);
-		saveTemplates(body.templates);
+		saveTemplates(p, body.templates);
 	}
-	if (typeof body.instructions === "string") saveInstructions(body.instructions);
-	return c.json({ templates: loadTemplates(), instructions: loadInstructions() });
+	if (typeof body.instructions === "string") saveInstructions(p, body.instructions);
+	return c.json({ templates: loadTemplates(p), instructions: loadInstructions(p) });
 });
 
 // The agent runs hurl itself while it works, and needs the same target the UI
 // uses: mirror the most recent host into hurl.env (read via --variables-file).
-function rememberHost(baseUrl: string): void {
-	const list = loadHosts();
+function rememberHost(p: Project, baseUrl: string): void {
+	const list = loadHosts(p);
 	const entry: HostConfig = { id: "current", name: "Current target", baseUrl, updatedAt: Date.now() };
 	const idx = list.findIndex((h) => h.id === entry.id);
 	if (idx >= 0) list[idx] = entry;
 	else list.unshift(entry);
-	saveHosts(list);
-	writeAgentFile(config.hurlEnvPath, `host=${baseUrl}\n`);
+	saveHosts(p, list);
+	writeAgentFile(p.hurlEnvPath, `host=${baseUrl}\n`);
 }
 
-app.get("/api/hosts", (c) => c.json({ hosts: loadHosts() }));
+app.get("/api/hosts", (c) => c.json({ hosts: loadHosts(c.get("project")) }));
 
 app.post("/api/hosts", async (c) => {
+	const p = c.get("project");
 	const body = await c.req.json().catch(() => ({}));
 	if (body.action === "save") {
 		const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
 		if (!/^https?:\/\/\S+$/i.test(baseUrl)) return c.json({ error: "baseUrl must be an http(s) URL" }, 400);
-		rememberHost(baseUrl);
+		rememberHost(p, baseUrl);
 	} else if (body.action === "delete") {
-		saveHosts(loadHosts().filter((x) => x.id !== body.id));
+		saveHosts(p, loadHosts(p).filter((x) => x.id !== body.id));
 	}
-	return c.json({ hosts: loadHosts() });
+	return c.json({ hosts: loadHosts(p) });
 });
 
 // Read-only facts for the Settings page: where things live and what is installed.
@@ -637,7 +569,9 @@ app.get("/api/info", (c) =>
 		workspace: config.workspace,
 		state: config.stateDir,
 		log: logFile,
-		sessions: sessionsDir,
+		sessions: c.get("project").sessionsDir,
+		project: c.get("project").id,
+		agentsMax: Number(process.env.PIHURL_MAX_AGENTS ?? 4),
 		auth: authEnabled(),
 		agentIsolated: config.agent.enabled,
 	}));
@@ -689,8 +623,14 @@ function isFile(p: string | null): p is string {
 
 // Hurl's HTML report stores response bodies as extension-less files; show them
 // as text instead of offering a download.
+// URLs are /report/<project>/<run>/...; the form from before projects, /report/<run>/..., still
+// works for the default project.
 app.get("/report/*", (c) => {
-	const file = resolveInside(config.reportDir, c.req.path.replace(/^\/report\/?/, ""));
+	const rest = c.req.path.replace(/^\/report\/?/, "");
+	const [first, ...tail] = rest.split("/");
+	const project = /^\d+$/.test(first) ? getProject(DEFAULT_ID) : getProject(first);
+	if (!project) return c.notFound();
+	const file = resolveInside(project.reportDir, /^\d+$/.test(first) ? rest : tail.join("/"));
 	return isFile(file) ? fileResponse(file, "text/plain; charset=utf-8") : c.notFound();
 });
 

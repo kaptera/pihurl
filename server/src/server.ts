@@ -5,13 +5,15 @@ import { app, chatSSEHandler } from "./routes.js";
 import { syncModelsAtBoot } from "./providers.js";
 import { config, ensureDirs } from "./config.js";
 import { seedDefaults } from "./defaults.js";
+import { listProjects } from "./projects.js";
+import { pool } from "./agents.js";
 import { startInternalServer } from "./internal.js";
 import { log, logFile } from "./log.js";
 import { guard } from "./security.js";
 
 bootLayout();
 ensureDirs();
-seedDefaults();
+for (const project of listProjects()) seedDefaults(project);
 syncModelsAtBoot();
 
 app.onError((err, c) => {
@@ -39,3 +41,11 @@ startInternalServer();
 server.listen(config.port, () => {
 	log("info", "server.listen", { port: config.port, workspace: config.workspace, state: config.stateDir, log: logFile });
 });
+
+// docker stop: let the agents end their processes instead of leaving them to be killed
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+	process.once(sig, () => {
+		log("info", "server.stop", { signal: sig });
+		void pool.shutdownAll().finally(() => process.exit(0));
+	});
+}

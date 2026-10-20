@@ -11,6 +11,7 @@ Everything happens in the browser, in one image.
 - Specs: upload OpenAPI 3 / Swagger 2, or have the agent create one from an API's docs
 - Tests grouped by spec; run all, a group or a selection; Hurl HTML/JUnit/JSON reports and run history
 - Any model: Ollama, LM Studio, vLLM and other OpenAI-compatible servers, OpenAI, Anthropic, OpenRouter
+- Projects (one per API) and parallel chats: several agents work at the same time
 - Chats persist across reloads and restarts
 
 ## Quick start
@@ -36,9 +37,10 @@ With Docker Compose, use the `docker-compose.yaml` from the repository.
 
 | | |
 |---|---|
-| `/workspace` | the agent's project: specs, tests, reports, chat transcripts. Mount it. |
-| `/state` | provider keys, chat index, logs; readable by root only, not by the agent. Mount a volume. |
+| `/workspace` | the agent's workspace: specs, tests, reports, chat transcripts (other projects in `.projects/`). Mount it. |
+| `/state` | provider keys, chat indexes, logs; readable by root only, not by the agent. Mount a volume. |
 | `PIHURL_TOKEN` | access token for the UI and API (empty = no sign-in; keep the port on `127.0.0.1`) |
+| `PIHURL_MAX_AGENTS` | most agents (chats) working at once, default `4` |
 | `PORT` | port inside the container, default `3000` |
 | `OLLAMA_HOST` | where the Ollama preset points, default `http://host.docker.internal:11434` |
 

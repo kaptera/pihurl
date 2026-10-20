@@ -52,8 +52,20 @@ function setPref(k,v){PREFS[k]=v;try{localStorage.setItem('pihurl.prefs',JSON.st
 // With PIHURL_TOKEN set the server answers 401 until the browser has signed in; any 401 after
 // that (the cookie expired, the token was changed) sends the page back to the sign-in screen.
 let AUTH_ON=false;
+// The project this tab works on (several tabs can work on different projects). The server learns it
+// from a header on every API call, and from ?project= on the event stream.
+let PROJ=(()=>{try{return sessionStorage.getItem('pihurl.project')||localStorage.getItem('pihurl.project')||'default'}catch(e){return 'default'}})();
+function rememberProject(id){PROJ=id;try{sessionStorage.setItem('pihurl.project',id);localStorage.setItem('pihurl.project',id)}catch(e){}}
 const rawFetch=window.fetch.bind(window);
-window.fetch=async(...a)=>{const r=await rawFetch(...a);if(r.status===401&&AUTH_ON)location.reload();return r};
+window.fetch=async(url,init={})=>{
+ const api=typeof url==='string'&&url.startsWith('/api/');
+ if(api){const h=new Headers(init.headers||{});if(!h.has('X-Pihurl-Project'))h.set('X-Pihurl-Project',PROJ);init={...init,headers:h}}
+ const r=await rawFetch(url,init);
+ if(r.status===401&&AUTH_ON)location.reload();
+ // the project was deleted elsewhere: fall back to the default one
+ if(api&&r.status===404)r.clone().json().then(j=>{if(j&&j.error==='unknown_project'){rememberProject('default');location.reload()}}).catch(()=>{});
+ return r;
+};
 function signIn(){
  return new Promise(resolve=>{
   const box=$('#login'),form=$('#loginForm'),inp=$('#loginToken'),err=$('#loginErr');
@@ -128,7 +140,7 @@ const S={
  active:null,editId:'new',
  templates:[],tpl:'',ptab:'templates',instr:'',instrOn:true,
  busy:false,
- chats:[],chatId:'',collapsed:new Set()
+ chats:[],chatId:'',collapsed:new Set(),projects:[],runningChats:new Set(),echo:0
 };
 let COV=new Map();
 
@@ -277,27 +289,50 @@ function connectStream(){
  // The backend sends SSE frames (`data: {...}\n\n`); strip the prefix before
  // parsing, and skip blank separator lines — JSON.parse of `data:` throws.
  const ac=chatAbort=new AbortController();
- fetch('/api/chat',{signal:ac.signal}).then(async res=>{
+ fetch('/api/chat?project='+encodeURIComponent(PROJ),{signal:ac.signal}).then(async res=>{
   const stream=res.body;if(!stream)return;
   const reader=stream.getReader();const dec=new TextDecoder();let buf='';
   const frame=d=>{buf+=dec.decode(d,{stream:true});let i;while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);if(!line.trim())continue;const json=line.replace(/^data:\s?/,'').trim();if(!json)continue;let ev;try{ev=JSON.parse(json)}catch{return}onFrame(ev)}};
   try{while(true){const {done,value}=await reader.read();if(done)break;frame(value)}}
   catch(e){if(ac.signal.aborted)return;toast('Stream error: '+(e.message||String(e)),true)}
-  finally{if(chatAbort===ac)chatAbort=null}
- }).catch(e=>{if(chatAbort===ac)chatAbort=null;if(!ac.signal.aborted)toast('Stream error: '+(e.message||String(e)),true)});
+  finally{if(chatAbort===ac){chatAbort=null;if(!ac.signal.aborted)setTimeout(connectStream,2000)}}
+ }).catch(e=>{if(chatAbort===ac){chatAbort=null;if(!ac.signal.aborted)setTimeout(connectStream,3000)}});
 }
 
 function agentNote(text){
  if(!curCard)return;
  const n=document.createElement('div');n.className='stopnote';n.textContent=text;curCard.msg.mb.append(n);scrollDown();
 }
+// One stream carries the events of every chat of the project, each tagged with its chat id. Events
+// of the chat on screen are drawn; for the others only the "working" state is kept (badges).
+function ensureCard(){
+ if(!curCard&&S.agentRunning){curCard={msg:newAgentMsg(),tools:new Map(),kind:'agent',textEl:null,raw:'',shown:''}}
+ return curCard;
+}
 function onFrame(ev){
  const t=ev.type;
+ if(t==='pihurl_running'){S.runningChats=new Set(ev.chats||[]);syncChatBadges();return}
+ if(t==='pihurl_busy'){
+  if(ev.busy)S.runningChats.add(ev.chat);else S.runningChats.delete(ev.chat);
+  syncChatBadges();
+  if(!ev.busy&&ev.chat!==S.chatId){const c=S.chats.find(x=>x.id===ev.chat);toast((c?'\u201c'+c.title+'\u201d':'A chat')+' finished');refreshChats()}
+  return;
+ }
+ if(ev.chat&&ev.chat!==S.chatId)return;
  // Track agent liveness beyond the current card: a prompt sent while the
  // agent streams is rejected by pi, so send() must route it as a steer.
- if(t==='agent_start'){S.agentRunning=true;return}
+ // (Another tab can have started the turn: then this tab is busy too.)
+ if(t==='agent_start'){S.agentRunning=true;if(!S.busy){S.busy=true;setBusy()}return}
+ // A user message this tab did not type (another tab on the same chat): draw it.
+ if(t==='message_end'&&ev.message&&ev.message.role==='user'){
+  if(S.echo>0){S.echo--;return}
+  const emp=$('.empty');if(emp)emp.remove();
+  addUser(textOf(typeof ev.message.content==='string'?[{type:'text',text:ev.message.content}]:ev.message.content));
+  curCard=null;
+  return;
+ }
  if(t==='agent_settled'){
-  S.agentRunning=false;
+  S.agentRunning=false;S.echo=0;
   flushRender();
   if(curCard){curCard.tools.forEach(tl=>{if(!tl.done)closeTool(tl,false)});curCard=null;}
   S.busy=false;setBusy();scrollDown(true);
@@ -305,7 +340,7 @@ function onFrame(ev){
   refreshTests();refreshSpecs(true);
   return;
  }
- if(!curCard)return;
+ if(!ensureCard())return;
  // Assistant text arrives as text_delta; thinking_delta and toolcall_delta are
  // other content blocks of the same message and are not shown.
  if(t==='message_update'){
@@ -370,14 +405,14 @@ function emptyState(){
 async function send(text){
  text=text.trim();if(!text||S.busy)return;
  const emp=$('.empty');if(emp){emp.remove();$('#chatTitle').textContent=text.slice(0,60)}
- S.busy=true;setBusy();addUser(text);
+ S.busy=true;S.echo=1;setBusy();addUser(text);
  const msg=newAgentMsg();
  $('#msgsIn').append(msg.el);
  curCard={msg,tools:new Map(),kind:'agent',textEl:null,raw:''};
  // Attach the SSE stream BEFORE the POST: the POST only resolves when the turn
  // ends, so attaching afterwards drops every event of the current turn.
  if(!chatAbort){connectStream();await sleep(80)}
- const post=async(kind)=>{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,message:text})});return r.json().catch(()=>null)};
+ const post=async(kind)=>{const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat:S.chatId,kind,message:text})});return r.json().catch(()=>null)};
  // Anything but an explicit success is a rejection: pi refusing the prompt
  // (success:false) and the backend failing to reach pi (error/detail) alike.
  const denied=j=>!j||j.success===false||!!j.error;
@@ -388,7 +423,7 @@ async function send(text){
   let kind=S.agentRunning?'steer':'prompt';
   let j=await post(kind);
   if(denied(j)){kind=kind==='steer'?'prompt':'steer';j=await post(kind)}
-  if(denied(j)){toast((j&&(j.detail||j.error))||'Agent rejected the message',true);S.busy=false;setBusy();}
+  if(denied(j)){toast((j&&(j.detail||j.error))||'Agent rejected the message',true);S.busy=false;S.echo=0;setBusy();}
   // On acceptance busy stays lit until agent_settled arrives over SSE.
   refreshChats();
  }catch(e){toast('Agent error: '+(e.message||String(e)),true);S.busy=false;setBusy();}
@@ -397,7 +432,7 @@ async function abortChat(){
  // Cancel the current run on the backend; the agent and the conversation stay,
  // so the stream is left open and the next message continues the chat.
  try{
-  await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'stop'})});
+  await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat:S.chatId,kind:'stop'})});
   agentNote('■ stopped');
  }catch(e){toast('Stop failed: '+(e.message||String(e)),true)}
  S.busy=false;setBusy();
@@ -405,13 +440,49 @@ async function abortChat(){
 function setBusy(){const b=$('#sendBtn');b.className='send'+(S.busy?' stop':'');b.innerHTML=I(S.busy?'stop':'send');$('#sugg').style.display=S.busy?'none':'flex'}
 const SUGG={'Cover uncovered endpoints':'Cover the uncovered endpoints in {{spec.path}}','Why do tests fail?':'Run the failing tests again and tell me why they fail','Run the full suite':'Run the full suite and summarise','Add negative cases':'Add negative cases to the existing tests of {{spec.path}}: auth, validation, unknown ids'};
 function renderSugg(){$('#sugg').innerHTML=['Cover uncovered endpoints','Why do tests fail?','Run the full suite','Add negative cases'].map(s=>`<button class="chip" data-act="ask" data-q="${esc(SUGG[s])}">${esc(s)}</button>`).join('')}
+/* ---------- projects ---------- */
+// A project is one API under test with its own specs, tests, reports, chats and target host.
+// Providers are shared. Switching reloads the page: every view then starts clean on the project.
+const projName=()=>{const p=S.projects.find(x=>x.id===PROJ);return p?p.name:PROJ};
+function renderProjButtons(){
+ $('#projBtn').innerHTML=`<span class="pn"><small>Project</small>${esc(projName())}</span>${I('chev')}`;
+ $('#tbProj').textContent=projName();
+}
+function renderProjMenu(){
+ const m=$('#projMenu');
+ m.innerHTML=`<button class="btn sm cm-new" data-act="projNew">${I('plus')}New project</button>`+S.projects.map(p=>`<div class="cm-row ${p.id===PROJ?'cur':''}"><button class="cm-main" data-act="projSwitch" data-id="${esc(p.id)}"><b>${esc(p.name)}</b><small>${esc(p.id)}</small></button><button class="cm-ic" data-act="projRename" data-id="${esc(p.id)}" aria-label="Rename">${I('write')}</button>${p.id==='default'?'':`<button class="cm-ic del" data-act="projDelete" data-id="${esc(p.id)}" aria-label="Delete">${I('trash')}</button>`}</div>`).join('');
+}
+function openProjMenu(anchor){
+ const m=$('#projMenu');
+ if(!m.hidden&&m.dataset.anchor===anchor.id){m.hidden=true;return}
+ renderProjMenu();m.dataset.anchor=anchor.id;m.hidden=false;
+ const r=anchor.getBoundingClientRect(),w=m.offsetWidth;
+ m.style.left=Math.max(10,Math.min(r.left,innerWidth-w-10))+'px';m.style.top=(r.bottom+6)+'px';
+}
+const projApi=body=>rawFetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json','X-Pihurl-Project':'default'},body:JSON.stringify(body)}).then(async r=>{const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||j.error||r.statusText);return j});
+function switchProject(id){rememberProject(id);location.reload()}
+
 /* ---------- chat list ---------- */
+// Chats belong to a project and several can work at once; this tab shows one of them (S.chatId,
+// remembered per project). The server has no "current chat".
 const chatsApi=body=>API('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-function applyChats(r){S.chats=r.chats||[];S.chatId=r.current||''}
+const chatKey=()=>'pihurl.chat.'+PROJ;
+function persistChat(){try{sessionStorage.setItem(chatKey(),S.chatId);localStorage.setItem(chatKey(),S.chatId)}catch(e){}}
+function applyChats(r){
+ S.chats=r.chats||[];
+ for(const c of S.chats){if(c.running)S.runningChats.add(c.id)}
+ syncChatBadges();
+}
 async function refreshChats(){try{applyChats(await API('/api/chats'))}catch(e){console.error('chats failed',e)}}
+function syncChatBadges(){
+ const others=[...S.runningChats].filter(id=>id!==S.chatId).length;
+ const b=$('#chatsBtn');if(b)b.classList.toggle('busy-others',others>0);
+ let n=$('#chatsBtn .nb');if(others){if(!n){n=document.createElement('span');n.className='nb';b.append(n)}n.textContent=others}else if(n)n.remove();
+ if(!$('#chatMenu').hidden)renderChatMenu();
+}
 function renderChatMenu(){
  const m=$('#chatMenu');
- m.innerHTML=`<button class="btn sm cm-new" data-act="newChat">${I('plus')}New chat</button>`+(S.chats.length?S.chats.map(c=>`<div class="cm-row ${c.id===S.chatId?'cur':''}"><button class="cm-main" data-act="chatSwitch" data-id="${esc(c.id)}"><b>${esc(c.title||'New chat')}</b><small>${c.title?ago(c.updatedAt):'empty'}</small></button><button class="cm-ic" data-act="chatRename" data-id="${esc(c.id)}" aria-label="Rename">${I('write')}</button><button class="cm-ic del" data-act="chatDelete" data-id="${esc(c.id)}" aria-label="Delete">${I('trash')}</button></div>`).join(''):'<div class="cm-empty">No chats yet.</div>');
+ m.innerHTML=`<button class="btn sm cm-new" data-act="newChat">${I('plus')}New chat</button>`+(S.chats.length?S.chats.map(c=>`<div class="cm-row ${c.id===S.chatId?'cur':''}"><button class="cm-main" data-act="chatSwitch" data-id="${esc(c.id)}"><b>${S.runningChats.has(c.id)?'<i class="spin"></i> ':''}${esc(c.title||'New chat')}</b><small>${S.runningChats.has(c.id)?'working…':(c.title?ago(c.updatedAt):'empty')}</small></button><button class="cm-ic" data-act="chatRename" data-id="${esc(c.id)}" aria-label="Rename">${I('write')}</button><button class="cm-ic del" data-act="chatDelete" data-id="${esc(c.id)}" aria-label="Delete">${I('trash')}</button></div>`).join(''):'<div class="cm-empty">No chats yet.</div>');
 }
 function closeChatMenu(){$('#chatMenu').hidden=true}
 async function toggleChatMenu(){
@@ -419,16 +490,24 @@ async function toggleChatMenu(){
  if(!m.hidden){closeChatMenu();return}
  await refreshChats();renderChatMenu();m.hidden=false;
 }
-// Run a chat action on the backend (new/switch/delete drop the agent process,
-// whose session is then reopened for the chat that is current afterwards) and redraw.
+// What this tab shows when it moves to another chat. The agents of the other chats keep working.
+function resetChatView(){curCard=null;S.busy=false;S.agentRunning=false;S.echo=0;setBusy()}
 async function chatAction(action,id){
- if(S.busy&&action!=='rename'&&!confirm('The agent is still working. Stop it and leave this chat?'))return;
  closeChatMenu();
- try{applyChats(await chatsApi({action,id}))}catch(e){toast('Chat action failed: '+(e.message||String(e)),true);return}
- if(chatAbort){chatAbort.abort();chatAbort=null}
- curCard=null;S.busy=false;S.agentRunning=false;setBusy();
- connectStream();
- await initChat();
+ try{
+  if(action==='new'){
+   const r=await chatsApi({action:'new'});S.chatId=r.id;persistChat();applyChats(r);resetChatView();emptyState();syncChatBadges();return;
+  }
+  if(action==='switch'){S.chatId=id;persistChat();resetChatView();await initChat();return}
+  if(action==='delete'){
+   const r=await chatsApi({action:'delete',id});applyChats(r);S.runningChats.delete(id);
+   if(id===S.chatId){
+    const next=S.chats[0];
+    if(next){S.chatId=next.id;persistChat();resetChatView();await initChat()}
+    else await chatAction('new');
+   }
+  }
+ }catch(e){toast('Chat action failed: '+(e.message||String(e)),true)}
 }
 const textOf=c=>(c||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
 // Redraw a stored conversation. Consecutive assistant messages and their tool
@@ -456,10 +535,17 @@ function renderHistory(messages){
 // Restore the conversation from the backend (pi's session on disk) so a reload,
 // a restart of the container or a second browser sees the same chat.
 async function initChat(){
- let h=null;
- try{h=await API('/api/chat/history')}catch(e){console.error('chat history failed',e)}
  await refreshChats();
- if(!h||!h.messages.length){emptyState();return}
+ if(!S.chatId){
+  // the chat this tab had in this project, else the newest one, else a fresh one
+  let saved='';try{saved=sessionStorage.getItem(chatKey())||localStorage.getItem(chatKey())||''}catch(e){}
+  S.chatId=S.chats.some(c=>c.id===saved)?saved:(S.chats[0]?S.chats[0].id:'');
+  if(!S.chatId){const r=await chatsApi({action:'new'});S.chatId=r.id}
+  persistChat();
+ }
+ let h=null;
+ try{h=await API('/api/chat/history?chat='+encodeURIComponent(S.chatId))}catch(e){toast(e.message||'Could not open the chat',true)}
+ if(!h||!h.messages.length){emptyState();if(h&&h.running){S.busy=true;S.agentRunning=true;setBusy()}return}
  $('#chatTitle').textContent=chatTitle();
  const {agent,tools}=renderHistory(h.messages);
  scrollDown(true);
@@ -667,7 +753,7 @@ const SETTINGS=[
 let INFO=null;
 async function renderSettings(){
  const row=d=>`<div class="srow"><div class="min"><b>${esc(d.title)}</b><div class="muted">${d.desc}</div></div><div class="seg">${d.opts.map(([v,l])=>`<button class="${PREFS[d.k]===v?'on':''}" data-act="setPref" data-k="${d.k}" data-v="${v}">${esc(l)}</button>`).join('')}</div></div>`;
- const about=INFO?`<dl class="kv">${[['pihurl',INFO.version||'—'],['Hurl',INFO.hurl],['Node',INFO.node],['Workspace',INFO.workspace],['State',INFO.state],['Log file',INFO.log],['Chat sessions',INFO.sessions],['Access token',INFO.auth?'required':'off (local use only)'],['Agent runs as',INFO.agentIsolated?'an unprivileged user':'the same user as the server']].map(([k,v])=>`<dt>${esc(k)}</dt><dd title="${esc(v)}">${esc(v)}</dd>`).join('')}</dl>`:'<div class="muted">Loading…</div>';
+ const about=INFO?`<dl class="kv">${[['pihurl',INFO.version||'—'],['Hurl',INFO.hurl],['Node',INFO.node],['Workspace',INFO.workspace],['State',INFO.state],['Log file',INFO.log],['Project',INFO.project],['Chat sessions',INFO.sessions],['Chats at once','up to '+INFO.agentsMax],['Access token',INFO.auth?'required':'off (local use only)'],['Agent runs as',INFO.agentIsolated?'an unprivileged user':'the same user as the server']].map(([k,v])=>`<dt>${esc(k)}</dt><dd title="${esc(v)}">${esc(v)}</dd>`).join('')}</dl>`:'<div class="muted">Loading…</div>';
  $('#settingsBody').innerHTML=`<div class="card cp"><h3 style="margin-bottom:6px">Chat</h3>${SETTINGS.map(row).join('')}</div>${AUTH_ON?`<div class="card cp" style="margin-top:14px"><div class="srow"><div class="min"><b>Session</b><div class="muted">You are signed in with the access token. Signing out asks for it again.</div></div><button class="btn sm" data-act="signOut">Sign out</button></div></div>`:''}<div class="card cp" style="margin-top:14px"><h3 style="margin-bottom:6px">About this server</h3>${about}</div>`;
  if(!INFO){try{INFO=await API('/api/info');if(S.view==='settings')renderSettings()}catch(e){INFO={version:'',hurl:'unknown',node:'',workspace:'',state:'',log:'',sessions:''};console.error('info failed',e)}}
 }
@@ -812,6 +898,21 @@ const A={
  toggleTool:t=>t.closest('.tool').classList.toggle('open'),
  ask:t=>{if(S.busy)return;go('chat');send(fillTpl(t.dataset.q))},
  newChat:()=>chatAction('new'),
+ projMenu:t=>openProjMenu(t),
+ projSwitch:t=>{if(t.dataset.id!==PROJ)switchProject(t.dataset.id);else $('#projMenu').hidden=true},
+ projNew:async()=>{
+  const name=prompt('Name of the new project (one API under test)');if(!name||!name.trim())return;
+  try{const r=await projApi({action:'create',name});switchProject(r.created)}catch(e){toast(e.message,true)}
+ },
+ projRename:async t=>{
+  const p=S.projects.find(x=>x.id===t.dataset.id);const name=prompt('Rename project',p?p.name:'');if(!name||!name.trim())return;
+  try{const r=await projApi({action:'rename',id:t.dataset.id,name});S.projects=r.projects;renderProjButtons();renderProjMenu()}catch(e){toast(e.message,true)}
+ },
+ projDelete:async t=>{
+  const p=S.projects.find(x=>x.id===t.dataset.id);
+  if(!confirm('Delete project "'+(p?p.name:t.dataset.id)+'" with all its specs, tests, reports and chats? This cannot be undone.'))return;
+  try{const r=await projApi({action:'delete',id:t.dataset.id});S.projects=r.projects;if(t.dataset.id===PROJ)switchProject('default');else{renderProjButtons();renderProjMenu()}}catch(e){toast(e.message,true)}
+ },
  chatMenu:()=>toggleChatMenu(),
  chatSwitch:t=>{if(t.dataset.id!==S.chatId)chatAction('switch',t.dataset.id);else closeChatMenu()},
  chatRename:async t=>{
@@ -907,8 +1008,11 @@ function renderDraft(d){ // preset click while creating a new provider
  $$('#provForm [data-act=preset]').forEach(b=>b.classList.toggle('on',b.dataset.k===d.kind));
  $('#models').innerHTML=pr.models.map(m=>`<option value="${esc(m)}">`).join('');
 }
+// Escape closes the open menus
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeChatMenu();$('#projMenu').hidden=true}});
 document.addEventListener('click',e=>{
  if(!e.target.closest('#chatMenu,#chatsBtn'))closeChatMenu();
+ if(!e.target.closest('#projMenu,#projBtn,#tbProj'))$('#projMenu').hidden=true;
  const t=e.target.closest('[data-act]');if(!t)return;
  const fn=A[t.dataset.act];if(fn)fn(t,e);
 });
@@ -967,12 +1071,15 @@ async function start(){
  try{s=await rawFetch('/api/session').then(r=>r.json())}catch(e){}
  AUTH_ON=!!s.auth;
  if(s.auth&&!s.authed)await signIn();
+ // which projects exist (without the project header: ours may be stale)
+ try{S.projects=(await rawFetch('/api/projects').then(r=>r.json())).projects||[]}catch(e){}
+ if(S.projects.length&&!S.projects.some(p=>p.id===PROJ))rememberProject('default');
  boot();
 }
 function boot(){
  loadState();
  loadPrompts();
- renderChrome();renderSugg();setBusy();updateBadges();updateHint();
+ renderChrome();renderProjButtons();renderSugg();setBusy();updateBadges();updateHint();
  // Open the SSE stream up front so the agent's very first (seeded) turn
  // renders live instead of arriving all at once.
  connectStream();

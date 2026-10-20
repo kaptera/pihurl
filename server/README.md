@@ -17,6 +17,9 @@ Node + TypeScript + Hono backend for [pihurl](../README.md). Orchestrates
 server/
 ├── src/
 │   ├── config.ts    # env-driven config, provider/template/host stores, dir setup
+│   ├── projects.ts  # projects: registry, per-project paths (workspace, sessions, state)
+│   ├── agents.ts    # pool of pi agents, one per chat (limits, idle shutdown, events)
+│   ├── chats.ts     # per-project chat index
 │   ├── defaults.ts  # first-boot AGENTS.md, hurl-syntax skill, prompt templates
 │   ├── pi.ts        # dependency-free RPC client for `pi --mode rpc`
 │   ├── run.ts       # Hurl test runner (one hurl process per file, JSON/HTML/JUnit + history)
@@ -32,14 +35,16 @@ server/
 | Method | Path                    | Purpose                                                              |
 |--------|-------------------------|----------------------------------------------------------------------|
 | GET    | `/health`               | liveness probe                                                       |
-| GET    | `/api/chat`             | SSE stream of every pi session event                                 |
-| GET    | `/api/chat/state`       | is the agent mid-turn?                                               |
+| GET    | `/api/chat`             | SSE stream of the project's pi events, every one tagged with its `chat`; starts with a `pihurl_running` snapshot and sends `pihurl_busy` when a chat starts or stops working |
+| GET    | `/api/chat/state`       | which chats of the project are mid-turn                              |
+| GET    | `/api/projects`         | list projects                                                        |
+| POST   | `/api/projects`         | `action`: `create` / `rename` / `delete` (`id`, `name`); `default` cannot be deleted |
 | GET    | `/api/info`             | versions, paths, and whether the token and agent isolation are on, for the Settings page |
 | GET/POST/DELETE | `/api/session` | sign-in state / sign in with the token / sign out (public)           |
-| GET    | `/api/chats`            | chat list: current id, titles, timestamps                            |
-| POST   | `/api/chats`            | `action`: `new` / `switch` / `rename` / `delete` (`id`, `title`); switching and deleting the current chat restarts the agent |
-| GET    | `/api/chat/history`     | messages of the current chat, read from pi's session (the UI redraws it on load) |
-| POST   | `/api/chat`             | `kind`: `prompt` / `steer` / `follow_up`, `stop` (abort the run, keep context), `new` (fresh chat, or the empty current one) |
+| GET    | `/api/chats`            | chat list: ids, titles, timestamps, which are running                |
+| POST   | `/api/chats`            | `action`: `new` (returns the new `id`) / `rename` / `delete` (`id`, `title`); deleting stops that chat's agent |
+| GET    | `/api/chat/history?chat=` | messages of a chat, read from pi's session (the UI redraws it on load) |
+| POST   | `/api/chat`             | `{chat, kind, message}`; `kind`: `prompt` / `steer` / `follow_up`, `stop` (abort the run, keep context); `429 too_many_agents` when every agent slot is busy |
 | GET    | `/api/specs`            | every spec in the workspace, parsed: title, server, endpoints, or an `error` |
 | POST   | `/api/specs`            | upload a spec (`{name, content}`); validated, stored as `specs/<name>` |
 | DELETE | `/api/specs?path=`      | delete a spec                                                        |
@@ -51,17 +56,37 @@ server/
 | POST   | `/api/run`              | run Hurl tests now (executed directly by the backend, not pi); without a `host` it uses the current target |
 | GET/POST | `/api/prompts`        | prompt templates (UI) + `AGENTS.md` (read by the agent)              |
 | GET/POST | `/api/hosts`          | target host; the latest is mirrored to `<workspace>/hurl.env`        |
-| GET    | `/report/*`             | static report files                                                  |
+| GET    | `/report/<project>/<run>/*` | static report files (`/report/<run>/*` still serves the default project) |
 | GET    | `/*`                    | web-ui SPA assets (falls back to the entry file)                     |
 
-There is no built-in auth in this build; keep the container behind your own
-network controls (see the security notes in the main README). If you add a reverse proxy
-or token later, gate it there.
+All `/api/*` endpoints except `/api/projects` and `/api/session` act on one project, named by the
+`X-Pihurl-Project` header (or `?project=`); without it the `default` project is used and an unknown id is
+`404 unknown_project`. Access control is described under "Access control" below.
+
+## Projects
+
+A project is an isolated workspace: its own specs, tests, reports, `AGENTS.md`, skills, target host, chats
+and agent settings. The registry is `<state>/projects.json`. `default` is the workspace root itself (so
+workspaces from earlier versions are simply the default project); every other project lives in
+`<workspace>/.projects/<id>` with its own `.pi/`. Ids are lowercase letters, digits and dashes. Provider
+settings (and their keys), the access token and the log are shared by all projects. The UI keeps the selected
+project per browser tab, so two tabs can work in two projects.
+
+## Chats run in parallel
+
+Each chat has its own pi process, started on its first prompt and kept in a pool (`agents.ts`). Chats
+therefore run at the same time, also across tabs and projects, and a chat keeps working when the UI looks at
+another one. `PIHURL_MAX_AGENTS` (default 4) caps the number of processes: when it is reached, an idle agent
+(least recently used) is stopped to make room, and if all are mid-turn the prompt is refused with
+`429 too_many_agents`. An agent idle for `PIHURL_AGENT_IDLE_MINUTES` (default 15) is stopped; the chat stays,
+and the next prompt starts a fresh process on the same session. A provider change stops idle agents at once
+and busy ones when their turn ends.
 
 ## Workspace and state
 
-pi runs with `<workspace>` as its working directory and `PI_CODING_AGENT_DIR=<workspace>/.pi`. The server's own
-files are kept apart in `PIHURL_STATE`, which the agent cannot read:
+pi runs with the project's folder as its working directory and `PI_CODING_AGENT_DIR=<project>/.pi`. The tree below
+is the `default` project (the workspace root). The server's own files are kept apart in `PIHURL_STATE`, which the
+agent cannot read:
 
 ```
 <workspace>/                    owned by the agent user
@@ -78,14 +103,14 @@ files are kept apart in `PIHURL_STATE`, which the agent cannot read:
 
 <state>/                        root only (0700) in the image
 ├── providers.json              providers including their API keys
-├── chats.json                  chat index: current chat, titles
-├── hosts.json, defaults.json
+├── projects.json               project registry (`default` is implicit)
+├── projects/<id>/              per project: chats.json (chat index), hosts.json, defaults.json
 └── logs/pihurl.log             application log, JSON lines
 ```
 
 Files the server creates in the workspace are chowned to the agent user so that it can edit them. A workspace
-from an older version, which kept the state files in the workspace, is migrated once at start: they are
-moved to `<state>`.
+from an older version, which kept the state files in the workspace or in the state root, is migrated once at
+start: provider keys and logs go to `<state>`, chats, hosts and defaults to `<state>/projects/default/`.
 
 ## Isolation of the agent
 
@@ -98,7 +123,7 @@ from the agent's shell. The server refuses to start if `PIHURL_STATE` is inside 
 The agent needs two things from the server, which it gets on a separate, loopback-only listener
 (`127.0.0.1:PIHURL_INTERNAL_PORT`, `internal.ts`): the **model proxy** `/llm/<provider>/…`, which forwards pi's
 requests to the provider's real endpoint and adds the real API key (only for paths below the provider's own
-base path), and `GET /api/specs`, which the `openapi-spec` skill uses to check the specs the agent wrote.
+base path), and `GET /p/<project>/api/specs`, which the `openapi-spec` skill uses to check the specs the agent wrote.
 
 ## Access control
 
@@ -142,12 +167,13 @@ and the report lists results under the same group headings.
 ## Chats and logs
 
 A chat is a pi session: its id is passed to pi as `--session-id`, and pi keeps the transcript
-in `.pi/sessions/<time>_<id>.jsonl`, so chats survive provider changes, crashes and container
-restarts. The UI's Chats menu lists them, switches between them (the agent is restarted on the
-chosen session), renames and deletes them (which removes the transcript). A chat is titled
-after its first prompt; an empty chat is not listed or kept, and "New chat" on an empty chat
-reuses it. `chats.json` is only an index: sessions found on disk that it does not know are
-imported, so the sessions folder is the source of truth.
+in `<project>/.pi/sessions/<time>_<id>.jsonl`, so chats survive provider changes, crashes and container
+restarts. The UI's Chats menu lists the project's chats with a spinner on those that are working, switches
+between them (nothing is stopped), renames and deletes them (which removes the transcript). The server has no
+notion of a "current" chat: the client names the chat in every request, and each browser tab remembers its own.
+A chat is titled after its first prompt; an empty chat is not listed. `chats.json` is only an index: sessions
+found on disk that it does not know are imported, so the sessions folder is the source of truth. A tab that
+did not send a prompt still shows it: the stream carries the user message and every event of every chat.
 
 `logs/pihurl.log` (5 MB x 4, rotated) holds one JSON object per line — and the same events
 go to `docker logs` in a short readable form:
@@ -155,7 +181,7 @@ go to `docker logs` in a short readable form:
 | event | meaning |
 |-------|---------|
 | `http` | every API call: method, path, status, ms |
-| `agent.start` / `agent.exit` | pi spawned (chat, provider, model) / ended (code, signal, intentional) |
+| `agent.start` / `agent.exit` | pi spawned (project, chat, provider, model) / ended (code, signal, intentional, idle) |
 | `chat.user` / `chat.assistant` | prompt and reply text, stop reason, tokens, tool names, provider errors |
 | `tool.start` / `tool.end` | tool name, args, output, duration, error flag |
 | `agent.retry`, `agent.run.*`, `sse.*` | retries, turn boundaries, browser stream connects |
@@ -182,6 +208,8 @@ jq -c 'select(.level=="error")' work/logs/pihurl.log            # what went wron
 | `PIHURL_AGENT_UID` / `PIHURL_AGENT_GID` | *(unset; 10001 in the image)* | Run pi and hurl as this user (the server must be root) |
 | `PIHURL_AGENT_HOME`| `/home/agent`                    | Home directory of the agent user                    |
 | `PIHURL_INTERNAL_PORT` | `3001`                       | Loopback port of the model proxy and spec list      |
+| `PIHURL_MAX_AGENTS` | `4`                             | Most pi processes at once (one per working or recently used chat) |
+| `PIHURL_AGENT_IDLE_MINUTES` | `15`                    | Stop an agent that has been idle this long (at least 1) |
 | `OLLAMA_HOST`      | `http://localhost:11434`         | Base URL offered by the Ollama preset (in Docker use `http://host.docker.internal:11434`) |
 
 `piCliPath` resolves automatically: `PI_CLI_PATH` → the installed package's bundled
