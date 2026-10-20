@@ -34,7 +34,8 @@ server/
 | GET    | `/health`               | liveness probe                                                       |
 | GET    | `/api/chat`             | SSE stream of every pi session event                                 |
 | GET    | `/api/chat/state`       | is the agent mid-turn?                                               |
-| GET    | `/api/info`             | versions (pihurl, Hurl, Node) and paths, shown on the Settings page  |
+| GET    | `/api/info`             | versions, paths, and whether the token and agent isolation are on, for the Settings page |
+| GET/POST/DELETE | `/api/session` | sign-in state / sign in with the token / sign out (public)           |
 | GET    | `/api/chats`            | chat list: current id, titles, timestamps                            |
 | POST   | `/api/chats`            | `action`: `new` / `switch` / `rename` / `delete` (`id`, `title`); switching and deleting the current chat restarts the agent |
 | GET    | `/api/chat/history`     | messages of the current chat, read from pi's session (the UI redraws it on load) |
@@ -57,27 +58,55 @@ There is no built-in auth in this build; keep the container behind your own
 network controls (see the security notes in the main README). If you add a reverse proxy
 or token later, gate it there.
 
-## Workspace
+## Workspace and state
 
-pi runs with `<workspace>` as its working directory and `PI_CODING_AGENT_DIR=<workspace>/.pi`:
+pi runs with `<workspace>` as its working directory and `PI_CODING_AGENT_DIR=<workspace>/.pi`. The server's own
+files are kept apart in `PIHURL_STATE`, which the agent cannot read:
 
 ```
-<workspace>/
-├── AGENTS.md              # standing instructions (edited on the Prompts tab)
-├── specs/*.yaml           # API specs: uploaded in the UI or written by the agent
-├── hurl.env               # host=... — the agent runs hurl with --variables-file hurl.env
-├── tests/**/*.hurl        # written by the agent
-├── report/<run id>/       # json/, html/, junit.xml, result.json per run (last 50 kept)
-├── providers.json         # providers incl. keys (state dir)
-├── chats.json             # chat index: current chat, titles (state dir)
-├── logs/pihurl.log        # application log, JSON lines (state dir)
+<workspace>/                    owned by the agent user
+├── AGENTS.md                   standing instructions (edited on the Prompts tab)
+├── specs/*.yaml                API specs: uploaded in the UI or written by the agent
+├── hurl.env                    host=... — the agent runs hurl with --variables-file hurl.env
+├── tests/**/*.hurl             written by the agent
+├── report/<run id>/            json/, html/, junit.xml, result.json per run (last 50 kept)
 └── .pi/
-    ├── models.json        # generated from providers.json
-    ├── sessions/*.jsonl   # pi's transcript of every chat (prompts, tool calls, results)
-    ├── skills/hurl-syntax/SKILL.md
-    ├── skills/openapi-spec/SKILL.md
+    ├── models.json             generated: points pi at the loopback model proxy, placeholder key
+    ├── sessions/*.jsonl        pi's transcript of every chat (prompts, tool calls, results)
+    ├── skills/{hurl-syntax,openapi-spec}/SKILL.md
     └── prompts/templates.json
+
+<state>/                        root only (0700) in the image
+├── providers.json              providers including their API keys
+├── chats.json                  chat index: current chat, titles
+├── hosts.json, defaults.json
+└── logs/pihurl.log             application log, JSON lines
 ```
+
+Files the server creates in the workspace are chowned to the agent user so that it can edit them. A workspace
+from an older version, which kept the state files in the workspace, is migrated once at start: they are
+moved to `<state>`.
+
+## Isolation of the agent
+
+When the server runs as root and `PIHURL_AGENT_UID` is set (the image does), `pi` and `hurl` are started as
+that user, with an environment built from an allow-list (`PATH`, `LANG`, `TZ`, `HOME`, plus `PI_CODING_AGENT_DIR`
+and `PIHURL_INTERNAL_URL`) instead of the server's own. `/state` is `0700 root`, and processes of another
+uid cannot read `/proc/<server pid>/environ`, so neither the provider keys nor the access token are reachable
+from the agent's shell. The server refuses to start if `PIHURL_STATE` is inside `WORKSPACE` in this mode.
+
+The agent needs two things from the server, which it gets on a separate, loopback-only listener
+(`127.0.0.1:PIHURL_INTERNAL_PORT`, `internal.ts`): the **model proxy** `/llm/<provider>/…`, which forwards pi's
+requests to the provider's real endpoint and adds the real API key (only for paths below the provider's own
+base path), and `GET /api/specs`, which the `openapi-spec` skill uses to check the specs the agent wrote.
+
+## Access control
+
+`security.ts` runs in front of every request (also the streaming `/api/chat`, which is served outside
+Hono): with `PIHURL_TOKEN` it requires a bearer token or the session cookie (an HMAC derived from the token;
+`POST /api/session` exchanges the token for it, 10 failures per address per 5 minutes) for everything but
+the UI's own files, `/health` and `/api/session`; without a token it only answers to the allowed host names;
+state-changing requests with a foreign `Origin` are always refused.
 
 Defaults (`AGENTS.md`, the two skills, the prompt templates) are written on first boot. A
 newer build upgrades them only while they are untouched (same content as the last copy it
@@ -143,10 +172,16 @@ jq -c 'select(.level=="error")' work/logs/pihurl.log            # what went wron
 | Variable           | Default                          | Meaning                                             |
 |--------------------|----------------------------------|-----------------------------------------------------|
 | `PORT`             | `3000`                           | HTTP port                                           |
-| `PIHURL_STATE`     | `~/.pihurl`                      | Root of all persistent state (mount as a volume)    |
-| `WORKSPACE`        | `$PIHURL_STATE/workspace`        | Working folder pi operates in (`/workspace`)        |
+| `PIHURL_STATE`     | `~/.pihurl` (`/state` in the image) | Server-private state: provider keys, chat index, logs. Must be outside `WORKSPACE` when the agent is unprivileged |
+| `WORKSPACE`        | `$PIHURL_STATE/workspace`        | Working folder pi operates in (`/workspace`); owned by the agent user |
 | `WEB_UI_DIR`       | `$PIHURL_STATE/web-ui`           | Where the web-ui SPA is served from                 |
 | `PI_CLI_PATH`      | *(auto-resolved)*                | Override the pi CLI path                            |
+| `PIHURL_TOKEN`     | *(empty)*                        | Access token; empty = no sign-in                    |
+| `PIHURL_TOKEN_FILE`| *(empty)*                        | Read the token from a file (Docker secrets)         |
+| `PIHURL_ALLOWED_HOSTS` | *(empty)*                    | Extra host names answered when no token is set      |
+| `PIHURL_AGENT_UID` / `PIHURL_AGENT_GID` | *(unset; 10001 in the image)* | Run pi and hurl as this user (the server must be root) |
+| `PIHURL_AGENT_HOME`| `/home/agent`                    | Home directory of the agent user                    |
+| `PIHURL_INTERNAL_PORT` | `3001`                       | Loopback port of the model proxy and spec list      |
 | `OLLAMA_HOST`      | `http://localhost:11434`         | Base URL offered by the Ollama preset (in Docker use `http://host.docker.internal:11434`) |
 
 `piCliPath` resolves automatically: `PI_CLI_PATH` → the installed package's bundled
@@ -163,7 +198,7 @@ WEB_UI_DIR=../web-ui PORT=3000 npm start
 ```
 
 `npm run dev` uses `tsx` for hot reload; `npm run typecheck` runs `tsc --noEmit`; `npm test` builds
-and runs the tests in `test/` (spec parser, spec files, default seeding).
+and runs the tests in `test/` (spec parser, default seeding, access guard, model proxy, state migration).
 
 The web UI is plain files in `web-ui/` (no build step). Agent answers are rendered by
 `markdown.js`, a small escaping Markdown renderer; its tests run with

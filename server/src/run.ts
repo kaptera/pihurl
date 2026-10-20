@@ -8,6 +8,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { agentEnv, mkdirAgent, spawnIdentity, writeAgentFile } from "./agent.js";
 import { config } from "./config.js";
 import { log } from "./log.js";
 
@@ -152,7 +153,13 @@ function runHurl(args: string[]): Promise<{ code: number; stderr: string }> {
 	return new Promise((resolvePromise, reject) => {
 		// cwd matters: workspace-relative test paths only resolve from the
 		// workspace root. Without it hurl would look in the server's own dir.
-		const proc = spawn("hurl", args, { cwd: config.workspace, stdio: ["ignore", "ignore", "pipe"] });
+		const proc = spawn("hurl", args, {
+			cwd: config.workspace,
+			stdio: ["ignore", "ignore", "pipe"],
+			// hurl may read files named in a test: run it as the agent user, with a clean environment
+			env: agentEnv(),
+			...spawnIdentity(),
+		});
 		let stderr = "";
 		proc.stderr.setEncoding("utf8");
 		proc.stderr.on("data", (c: string) => {
@@ -359,7 +366,7 @@ export async function runTests(opts: RunOptions = {}): Promise<RunResult> {
 		const jsonDir = join(dir, "json");
 		const htmlDir = join(dir, "html");
 		const junit = join(dir, "junit.xml");
-		mkdirSync(dir, { recursive: true });
+		mkdirAgent(dir);
 
 		const varArgs: string[] = [];
 		if (host) varArgs.push("--variable", `host=${host}`);
@@ -394,7 +401,7 @@ export async function runTests(opts: RunOptions = {}): Promise<RunResult> {
 			...(existsSync(join(htmlDir, "index.html")) ? { htmlFile: `/report/${id}/html/index.html` } : {}),
 			...(existsSync(junit) ? { junitFile: `/report/${id}/junit.xml` } : {}),
 		};
-		writeFileSync(join(dir, "result.json"), JSON.stringify(result, null, 2));
+		writeAgentFile(join(dir, "result.json"), JSON.stringify(result, null, 2));
 		log("info", "run.done", {
 			id, files: result.files.length, failed: result.files.filter((f) => f.status === "fail").length,
 			ms: result.duration, host: host || undefined,

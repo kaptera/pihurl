@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { writeAgentFile } from "./agent.js";
 import { config, loadTemplates, saveTemplates, type PromptTemplate } from "./config.js";
 
 /**
@@ -33,7 +34,7 @@ the tests and shows the report to the user; your job is to keep the files correc
   \`openapi-spec\` skill and write \`specs/<api-name>.yaml\`. The UI shows new specs on the
   Spec tab when you finish your turn. Say in your answer what is verified against the
   real API and what is inferred.
-- After writing a spec, check that it parses: \`curl -s localhost:3000/api/specs\`
+- After writing a spec, check that it parses: \`curl -s "$PIHURL_INTERNAL_URL/api/specs"\`
   lists every spec with its endpoints, or an \`error\` that says what is wrong.
 
 ## Writing tests
@@ -341,7 +342,7 @@ Rules that keep it valid and honest:
 ## 4. Check that it parses
 
 \`\`\`bash
-curl -s localhost:3000/api/specs | node -e 'const s=JSON.parse(require("fs").readFileSync(0,"utf8")).specs.find(x=>x.path==="specs/NAME.yaml");console.log(s?{error:s.error,endpoints:s.endpoints.length,server:s.server}:"not listed")'
+curl -s "$PIHURL_INTERNAL_URL/api/specs" | node -e 'const s=JSON.parse(require("fs").readFileSync(0,"utf8")).specs.find(x=>x.path==="specs/NAME.yaml");console.log(s?{error:s.error,endpoints:s.endpoints.length,server:s.server}:"not listed")'
 \`\`\`
 
 Replace \`NAME\`. \`error\` explains what is wrong (YAML syntax, missing \`paths\`, ...); fix it and
@@ -444,8 +445,7 @@ function manage(rec: Record<string, string>, key: string, path: string, content:
 		const untouched = rec[key] === cur || (LEGACY[key] ?? []).includes(cur);
 		if (!untouched) return false; // edited by the user: leave it alone
 	}
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, content);
+	writeAgentFile(path, content);
 	rec[key] = fresh;
 	return true;
 }

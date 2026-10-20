@@ -368,3 +368,12 @@ select.inp{width:auto;padding:6px 28px 6px 10px;font-size:12.5px;appearance:none
 .srow .seg{flex:none;flex-wrap:wrap}
 @media (max-width:860px){.srow{flex-direction:column;align-items:flex-start;gap:10px}}
 #v-settings .kv dd{white-space:normal;word-break:break-all}
+
+/* sign-in */
+.login{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:var(--bg);padding:20px}
+.login[hidden]{display:none}
+.login-card{width:min(380px,100%);padding:28px;display:flex;flex-direction:column;gap:12px;align-items:stretch;text-align:center}
+.login-card .logo{margin:0 auto 4px;width:48px;height:48px;font-size:28px;border-radius:14px}
+.login-card h2{font-size:20px;letter-spacing:-.02em}
+.login-card .btn{justify-content:center;padding:10px}
+.login-err{min-height:18px;font-size:12.5px;color:var(--bad)}

@@ -37,14 +37,26 @@ RUN npm run build
 # PIHURL_STATE below is a volume).
 COPY web-ui/ /app/web-ui/
 
-ENV PIHURL_STATE=/workspace
-# The workspace volume mount; without this the backend would default to
-# $PIHURL_STATE/workspace and miss the volume contents entirely.
+# Two volumes. /workspace is the agent's project (specs, tests, reports, chats). /state holds what
+# the agent must not see: provider API keys, the chat index, logs. The server runs as root and
+# starts pi and hurl as an unprivileged user (uid 10001 unless PIHURL_AGENT_UID says otherwise);
+# /state is 0700 root, so that user cannot read it. See the README, "Security".
+ENV PIHURL_STATE=/state
 ENV WORKSPACE=/workspace
+ENV PIHURL_AGENT_UID=10001
+ENV PIHURL_AGENT_GID=10001
 ENV WEB_UI_DIR=/app/web-ui
 ENV PORT=3000
+# Loopback only, never published: the model proxy and spec list the agent uses.
+ENV PIHURL_INTERNAL_PORT=3001
 # Where the Ollama preset points. "localhost" would be this container.
 ENV OLLAMA_HOST=http://host.docker.internal:11434
+RUN mkdir -p /state /workspace /home/agent \
+ && chmod 700 /state \
+ && chown 10001:10001 /workspace /home/agent
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "dist/server.js"]

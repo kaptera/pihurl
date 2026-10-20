@@ -48,6 +48,29 @@ const PREF_DEFAULTS={toolCards:'auto',sendKey:'enter'};
 const PREFS=(()=>{let p={};try{p=JSON.parse(localStorage.getItem('pihurl.prefs')||'{}')}catch(e){}return{...PREF_DEFAULTS,...p}})();
 function setPref(k,v){PREFS[k]=v;try{localStorage.setItem('pihurl.prefs',JSON.stringify(PREFS))}catch(e){}}
 
+/* ---------- access token ---------- */
+// With PIHURL_TOKEN set the server answers 401 until the browser has signed in; any 401 after
+// that (the cookie expired, the token was changed) sends the page back to the sign-in screen.
+let AUTH_ON=false;
+const rawFetch=window.fetch.bind(window);
+window.fetch=async(...a)=>{const r=await rawFetch(...a);if(r.status===401&&AUTH_ON)location.reload();return r};
+function signIn(){
+ return new Promise(resolve=>{
+  const box=$('#login'),form=$('#loginForm'),inp=$('#loginToken'),err=$('#loginErr');
+  box.hidden=false;inp.focus();
+  form.onsubmit=async e=>{
+   e.preventDefault();err.textContent='';
+   try{
+    const r=await rawFetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:inp.value})});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok){box.hidden=true;inp.value='';resolve();return}
+    err.textContent=j.detail||'Could not sign in';
+   }catch(x){err.textContent='Server not reachable'}
+   inp.select();
+  };
+ });
+}
+
 /* ---------- backend API ---------- */
 // Every screen here talks to the Node backend; nothing is simulated client-side.
 async function api(path, opts){
@@ -644,8 +667,8 @@ const SETTINGS=[
 let INFO=null;
 async function renderSettings(){
  const row=d=>`<div class="srow"><div class="min"><b>${esc(d.title)}</b><div class="muted">${d.desc}</div></div><div class="seg">${d.opts.map(([v,l])=>`<button class="${PREFS[d.k]===v?'on':''}" data-act="setPref" data-k="${d.k}" data-v="${v}">${esc(l)}</button>`).join('')}</div></div>`;
- const about=INFO?`<dl class="kv">${[['pihurl',INFO.version||'—'],['Hurl',INFO.hurl],['Node',INFO.node],['Workspace',INFO.workspace],['State',INFO.state],['Log file',INFO.log],['Chat sessions',INFO.sessions]].map(([k,v])=>`<dt>${esc(k)}</dt><dd title="${esc(v)}">${esc(v)}</dd>`).join('')}</dl>`:'<div class="muted">Loading…</div>';
- $('#settingsBody').innerHTML=`<div class="card cp"><h3 style="margin-bottom:6px">Chat</h3>${SETTINGS.map(row).join('')}</div><div class="card cp" style="margin-top:14px"><h3 style="margin-bottom:6px">About this server</h3>${about}</div>`;
+ const about=INFO?`<dl class="kv">${[['pihurl',INFO.version||'—'],['Hurl',INFO.hurl],['Node',INFO.node],['Workspace',INFO.workspace],['State',INFO.state],['Log file',INFO.log],['Chat sessions',INFO.sessions],['Access token',INFO.auth?'required':'off (local use only)'],['Agent runs as',INFO.agentIsolated?'an unprivileged user':'the same user as the server']].map(([k,v])=>`<dt>${esc(k)}</dt><dd title="${esc(v)}">${esc(v)}</dd>`).join('')}</dl>`:'<div class="muted">Loading…</div>';
+ $('#settingsBody').innerHTML=`<div class="card cp"><h3 style="margin-bottom:6px">Chat</h3>${SETTINGS.map(row).join('')}</div>${AUTH_ON?`<div class="card cp" style="margin-top:14px"><div class="srow"><div class="min"><b>Session</b><div class="muted">You are signed in with the access token. Signing out asks for it again.</div></div><button class="btn sm" data-act="signOut">Sign out</button></div></div>`:''}<div class="card cp" style="margin-top:14px"><h3 style="margin-bottom:6px">About this server</h3>${about}</div>`;
  if(!INFO){try{INFO=await API('/api/info');if(S.view==='settings')renderSettings()}catch(e){INFO={version:'',hurl:'unknown',node:'',workspace:'',state:'',log:'',sessions:''};console.error('info failed',e)}}
 }
 
@@ -858,6 +881,7 @@ const A={
  setPref:t=>{setPref(t.dataset.k,t.dataset.v);if(t.dataset.k==='toolCards')applyToolPref();if(t.dataset.k==='sendKey')updateHint();renderSettings()},
  resetPrefs:()=>{Object.keys(PREF_DEFAULTS).forEach(k=>setPref(k,PREF_DEFAULTS[k]));applyToolPref();updateHint();renderSettings();toast('Settings reset')},
  toolsAll:()=>toolsAll(),
+ signOut:async()=>{try{await rawFetch('/api/session',{method:'DELETE'})}finally{location.reload()}},
  allChk:()=>{const all=S.files.map(f=>f.path);if(checkState(all)==='on')S.checked.clear();else all.forEach(p=>S.checked.add(p));renderTHead();renderFiles()},
  grpChk:(t,e)=>{
   e.stopPropagation();const g=groupByKey(t.dataset.g);if(!g)return;
@@ -938,7 +962,14 @@ async function loadPrompts(){
   INSTR=S.instr=res.instructions||'';
  }catch(e){console.error('loadPrompts failed',e)}
 }
-(function boot(){
+async function start(){
+ let s={auth:false,authed:true};
+ try{s=await rawFetch('/api/session').then(r=>r.json())}catch(e){}
+ AUTH_ON=!!s.auth;
+ if(s.auth&&!s.authed)await signIn();
+ boot();
+}
+function boot(){
  loadState();
  loadPrompts();
  renderChrome();renderSugg();setBusy();updateBadges();updateHint();
@@ -948,4 +979,5 @@ async function loadPrompts(){
  initChat();
  const h=(location.hash||'').slice(1);
  go(NAV.some(n=>n[0]===h)?h:'chat');
-})();
+}
+start();

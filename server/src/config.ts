@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentIdentity, mkdirAgent, writeAgentFile } from "./agent.js";
 
 /**
  * Configuration for the pihurl backend.
@@ -72,6 +73,25 @@ export const config = {
 	// straight at the project folder via WEB_UI_DIR.
 	webUiDir: resolve(env("WEB_UI_DIR", join(stateDir, "web-ui"))),
 
+	// The agent (pi) and hurl run as this unprivileged user when the server starts as root,
+	// so that the agent can neither read the state dir (provider keys, logs) nor the server's
+	// environment. Without PIHURL_AGENT_UID (local development) everything runs as one user.
+	agent: agentIdentity(),
+
+	// Loopback-only listener for the agent: the model proxy (which holds the provider keys)
+	// and a read-only spec list. Never published by Docker, unlike `port`.
+	internalPort: Number(env("PIHURL_INTERNAL_PORT", "3001")),
+	internalUrl: `http://127.0.0.1:${env("PIHURL_INTERNAL_PORT", "3001")}`,
+
+	// Shared secret for the web UI and API; empty = authentication off.
+	token: readToken(),
+
+	// Host names the server answers to when authentication is off (DNS-rebinding guard).
+	allowedHosts: [
+		"localhost", "127.0.0.1", "[::1]", "host.docker.internal",
+		...env("PIHURL_ALLOWED_HOSTS", "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+	],
+
 	// Path to the pi CLI (`dist/bundle/cli.js` of @earendil-works/pi-coding-agent).
 	// Resolution order: explicit PI_CLI_PATH, then the installed package's own
 	// cli.js, then the node_modules/.bin/pi shim.
@@ -87,6 +107,20 @@ export const config = {
 	// node is correct but PATH points at an older one, and vice versa.
 	nodeBin: resolveNodeBin(),
 } as const;
+
+function readToken(): string {
+	const direct = env("PIHURL_TOKEN").trim();
+	if (direct) return direct;
+	const file = env("PIHURL_TOKEN_FILE");
+	if (file) {
+		try {
+			return readFileSync(file, "utf8").trim();
+		} catch (err) {
+			throw new Error(`cannot read PIHURL_TOKEN_FILE: ${(err as Error).message}`);
+		}
+	}
+	return "";
+}
 
 function resolveNodeBin(): string {
 	const override = env("PI_NODE_BIN", "");
@@ -167,8 +201,7 @@ export function loadTemplates(): PromptTemplate[] {
 }
 
 export function saveTemplates(list: PromptTemplate[]): void {
-	mkdirSync(promptsDir, { recursive: true });
-	writeFileSync(config.templatesPath, JSON.stringify(list, null, 2));
+	writeAgentFile(config.templatesPath, JSON.stringify(list, null, 2));
 }
 
 export function loadInstructions(): string {
@@ -180,8 +213,7 @@ export function loadInstructions(): string {
 }
 
 export function saveInstructions(text: string): void {
-	mkdirSync(promptsDir, { recursive: true });
-	writeFileSync(config.instructionsPath, text);
+	writeAgentFile(config.instructionsPath, text);
 }
 
 // ---- hosts ------------------------------------------------------------------
@@ -234,6 +266,5 @@ export function loadModels(): ModelsFile {
 }
 
 export function saveModels(models: ModelsFile): void {
-	mkdirSync(dirname(config.modelsPath), { recursive: true });
-	writeFileSync(config.modelsPath, JSON.stringify({ providers: models }, null, 2));
+	writeAgentFile(config.modelsPath, JSON.stringify({ providers: models }, null, 2));
 }

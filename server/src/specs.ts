@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { parse } from "yaml";
+import { writeAgentFile } from "./agent.js";
 import { config } from "./config.js";
 
 /**
@@ -169,9 +170,8 @@ export function saveSpec(name: string, content: string): string {
 	if (!content.trim()) throw new Error("the file is empty");
 	if (content.length > MAX_BYTES) throw new Error("spec is larger than 5 MB");
 	parseSpec(content); // throws with a readable message
-	mkdirSync(specsDir, { recursive: true });
 	const file = specFileName(name);
-	writeFileSync(join(specsDir, file), content);
+	writeAgentFile(join(specsDir, file), content);
 	return `specs/${file}`;
 }
 

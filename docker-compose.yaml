@@ -4,13 +4,32 @@ services:
     image: pihurl
     restart: unless-stopped
     ports:
-      # Local only: pihurl has no authentication and its agent can run shell commands.
+      # Local only. Keep it that way unless PIHURL_TOKEN is set and the traffic is encrypted.
       - "127.0.0.1:3000:3000"
     environment:
+      # Access token for the UI and API. Empty = no sign-in (fine for 127.0.0.1 only).
+      # Generate one with: openssl rand -hex 24
+      PIHURL_TOKEN: ${PIHURL_TOKEN:-}
+      # Extra host names to answer to when no token is set (a token makes this unnecessary).
+      PIHURL_ALLOWED_HOSTS: ${PIHURL_ALLOWED_HOSTS:-}
+      # The agent runs as this user. On Linux, set PIHURL_UID/PIHURL_GID to your own ids
+      # (PIHURL_UID=$(id -u) PIHURL_GID=$(id -g) docker compose up -d) so that ./work stays yours.
+      PIHURL_AGENT_UID: ${PIHURL_UID:-10001}
+      PIHURL_AGENT_GID: ${PIHURL_GID:-10001}
       # Where the "Ollama" provider preset points; the default reaches Ollama on the Docker host.
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Specs, tests, reports, chats, logs and provider settings.
+      # The agent's project: specs, tests, reports, chats. Open to the agent.
       - ./work:/workspace
+      # Provider keys, chat index, logs. Not readable by the agent.
+      - pihurl-state:/state
+    # The server only needs to chown the workspace and start the agent as another user.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+
+volumes:
+  pihurl-state:

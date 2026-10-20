@@ -56,8 +56,15 @@ Open <http://localhost:3000>, then:
 
 Without Compose: `./run.sh [port]` builds the image and starts it in the foreground.
 
-Everything lives in `./work` (mounted at `/workspace`): specs, tests, reports, chats, logs and the
-provider settings. Delete it to start over.
+Two volumes: `./work` is the agent's project (specs, tests, reports, chat transcripts) and is yours to
+browse and edit; the named volume `pihurl-state` (mounted at `/state`) holds what the agent must not see:
+provider API keys, the chat index and the logs. Delete both to start over.
+
+To protect the UI with a token, start it with `PIHURL_TOKEN` set (`openssl rand -hex 24` makes a good one):
+
+```bash
+PIHURL_TOKEN=$(openssl rand -hex 24) docker compose up -d   # then write the token down: it is asked once per browser
+```
 
 ## How it works
 
@@ -70,17 +77,21 @@ Browser ── HTTP / SSE ──▶ backend (Node, Hono)
                            └─ /report/*          run reports
 ```
 
-The workspace is the agent's project folder:
+The agent's project folder and the server's private state are separate:
 
 ```
-/workspace
+/workspace                 owned by the agent user
 ├── AGENTS.md              instructions the agent reads (editable in the UI)
 ├── specs/                 OpenAPI documents
 ├── tests/<tag>/*.hurl     tests written by the agent
 ├── hurl.env               host=<the target API>, used by the agent's own hurl runs
 ├── report/<run id>/       Hurl reports and the normalised result of each run
-├── logs/pihurl.log        application log (JSON lines)
-└── .pi/                   models.json, skills, chat transcripts
+└── .pi/                   models.json (no keys), skills, chat transcripts
+
+/state                     root only (0700), invisible to the agent
+├── providers.json         providers including their API keys
+├── chats.json, hosts.json, defaults.json
+└── logs/pihurl.log        application log (JSON lines)
 ```
 
 Developer documentation (endpoints, configuration, log events, tests) is in
@@ -88,21 +99,34 @@ Developer documentation (endpoints, configuration, log events, tests) is in
 
 ## Security
 
-pihurl is meant for a trusted machine or network. Read this before exposing it.
+pihurl is meant for a trusted machine or network. What it does about it, and what it cannot do:
 
-- **No authentication.** Anyone who can reach the port controls the agent. The default Compose file
-  and `run.sh` publish the port on `127.0.0.1` only; keep it that way, or put your own reverse proxy
-  with authentication in front.
-- **The agent has a shell.** It can read, write and run commands as root inside the container. The
-  container is the sandbox: do not mount anything you do not want it to touch, and restrict its
-  network if the model is not trusted.
-- **Secrets are stored in plain text** in the volume (`providers.json`, `.pi/models.json`), and the
-  agent can read them. They are never sent back to the browser and pihurl does not log them, but anything the agent
-  prints (for example by reading the file) ends up in its transcript. Use keys that you can afford
-  to revoke.
-- **Tests change data.** Point the target host at a test environment, not at production.
-- Content from the tested API ends up in the agent's context, so a hostile API can try to
-  prompt-inject it.
+- **The agent is unprivileged and cannot see your secrets.** The server runs as root inside the container
+  and starts pi, and every command the agent runs, as an unprivileged user (uid 10001). That user can
+  read and write `/workspace` and nothing else that matters: `/state` is root-only, `/proc/<server>/environ`
+  is closed to it, and its environment is a short allow-list (no token, no keys). The agent still
+  has network access and a shell in its sandbox: it can run any command inside the container and reach any
+  host the container can reach. Treat the container as the sandbox.
+- **Provider API keys never reach the agent.** `providers.json` is in `/state`. pi is configured with a
+  loopback proxy (`127.0.0.1:3001`, never published) as its model endpoint and a placeholder key; the
+  server's proxy forwards the request and adds the real key, and only below the provider's own base path.
+  The agent can use the model through that proxy, but it cannot read the key or the real endpoint address.
+- **Access token.** Set `PIHURL_TOKEN` (or `PIHURL_TOKEN_FILE`) and the UI asks for it; the API and reports
+  need it as a session cookie (browser) or `Authorization: Bearer <token>` (scripts). Failed sign-ins are
+  limited to 10 per address per 5 minutes. Without a token there is no sign-in: the port is published on
+  `127.0.0.1` only, and the server only answers to `localhost`, `127.0.0.1`, `[::1]` and
+  `host.docker.internal` (add more with `PIHURL_ALLOWED_HOSTS`), which blocks DNS-rebinding attacks from web
+  pages. Requests that change something and come from another origin are refused in both modes.
+- **Traffic is not encrypted.** Put pihurl behind a TLS reverse proxy before it leaves the machine; the session
+  cookie is marked `Secure` when the proxy sends `X-Forwarded-Proto: https`.
+- **Hardened container.** The Compose file drops all capabilities except those the server needs to hand
+  the workspace to the agent user, and sets `no-new-privileges`.
+- **What is not covered.** Anything the agent prints ends up in its chat transcript (`.pi/sessions`), and a
+  hostile API can try to prompt-inject the agent. Tests change data: point the target host at a test
+  environment. Older chat transcripts from before this layout may contain keys or addresses the agent printed.
+
+On Linux, run the agent as your own user so that `./work` stays yours:
+`PIHURL_UID=$(id -u) PIHURL_GID=$(id -g) docker compose up -d`.
 
 ## Development
 

@@ -12,7 +12,12 @@ import {
 	currentChatId, deleteChat, ensureSessionsDir, listChats, newChat, renameChat, sessionsDir, switchChat, touchChat,
 } from "./chats.js";
 import { clip, log, logFile } from "./log.js";
+import { agentEnv, spawnIdentity, writeAgentFile } from "./agent.js";
+import {
+	authEnabled, clearedCookie, clearLoginFailures, guard, isAuthenticated, loginAllowed, recordLoginFailure, sessionCookie, tokenMatches,
+} from "./security.js";
 import { PiRpcClient, type PiEvent, type PiExit } from "./pi.js";
+import { modelsKeyFor, providerArgs, syncModelsAtBoot, syncModelsFromProviders } from "./providers.js";
 import { listHistory, runTests } from "./run.js";
 import { deleteSpec, listSpecs, saveSpec } from "./specs.js";
 import { listTestFiles, testFilesExist } from "./testfiles.js";
@@ -45,6 +50,42 @@ import { listTestFiles, testFilesExist } from "./testfiles.js";
 
 export const app = new Hono();
 
+// Host, origin and access-token checks come first (security.ts). The streaming chat endpoint is
+// served outside Hono and runs the same guard in server.ts.
+app.use("*", async (c, next) => {
+	const g = guard({ method: c.req.method, path: c.req.path, headers: c.req.header() });
+	if (!g.ok) return c.json({ error: g.error, detail: g.message }, g.status as 401 | 403);
+	await next();
+});
+
+// The sign-in state, for the UI.
+app.get("/api/session", (c) => c.json({ auth: authEnabled(), authed: isAuthenticated(c.req.header()) }));
+
+app.post("/api/session", async (c) => {
+	if (!authEnabled()) return c.json({ auth: false, authed: true });
+	const ip = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress ?? "unknown";
+	if (!loginAllowed(ip)) {
+		log("warn", "auth.blocked", { ip });
+		return c.json({ error: "too_many_attempts", detail: "too many failed attempts, try again in a few minutes" }, 429);
+	}
+	const body = await c.req.json().catch(() => ({}));
+	if (!tokenMatches(typeof body.token === "string" ? body.token : "")) {
+		recordLoginFailure(ip);
+		log("warn", "auth.failed", { ip });
+		return c.json({ error: "wrong_token", detail: "wrong token" }, 401);
+	}
+	clearLoginFailures(ip);
+	const secure = c.req.header("x-forwarded-proto") === "https" || c.req.url.startsWith("https:");
+	c.header("Set-Cookie", sessionCookie(secure));
+	log("info", "auth.login", { ip });
+	return c.json({ auth: true, authed: true });
+});
+
+app.delete("/api/session", (c) => {
+	c.header("Set-Cookie", clearedCookie());
+	return c.json({ auth: authEnabled(), authed: false });
+});
+
 // One line per API call (not static assets, not the 1s state polling).
 app.use("/api/*", async (c, next) => {
 	const t0 = Date.now();
@@ -57,35 +98,6 @@ app.use("/api/*", async (c, next) => {
 // ---- agent process ----------------------------------------------------------
 
 let piClient: PiRpcClient | null = null;
-
-// Stable provider key used both as the models.json entry name and the runtime
-// --provider flag. Pi resolves --provider against the keys in models.json, so
-// the two must match exactly.
-function providerKey(p: ProviderConfig): string {
-	const slug = (p.name || p.kind)
-		.toLowerCase()
-		.replace(/[^a-z0-9-]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	return slug || "custom";
-}
-
-// models.json is an object keyed by provider name, so two providers whose names
-// slugify the same (two "llama" endpoints, say) would silently overwrite each
-// other. Disambiguate the second+ occurrence with the provider id.
-function modelsKeyFor(p: ProviderConfig, list: ProviderConfig[]): string {
-	const slug = providerKey(p);
-	const collide = list.some((q) => q.id !== p.id && providerKey(q) === slug);
-	return collide ? `${slug}-${p.id}` : slug;
-}
-
-// pi reads endpoints and keys from models.json (rebuilt on every provider
-// change); --provider/--model only select which of them this run uses.
-function providerArgs(p: ProviderConfig, list: ProviderConfig[]): string[] {
-	const args: string[] = [];
-	if (p.baseUrl && p.model) args.push("--provider", modelsKeyFor(p, list));
-	if (p.model) args.push("--model", p.model);
-	return args;
-}
 
 // Drop the running agent so a provider change takes effect on the next prompt.
 function restartPi(): void {
@@ -116,8 +128,10 @@ function ensurePi(): PiRpcClient {
 				// The transcript lives in the volume: it outlives agent and container restarts.
 				"--session-id", chatId, "--session-dir", sessionsDir,
 			],
-			// Keep models.json and skills in the volume instead of ~/.pi/agent.
-			env: { PI_CODING_AGENT_DIR: config.agentDir },
+			// Keep models.json and skills in the workspace volume instead of ~/.pi/agent. The agent's
+			// environment is a clean one: no access token, no provider keys (those stay in the server).
+			env: agentEnv({ PI_CODING_AGENT_DIR: config.agentDir, PIHURL_INTERNAL_URL: config.internalUrl }),
+			...spawnIdentity(),
 		});
 		log("info", "agent.start", { chat: chatId, provider: provider?.name ?? null, model: provider?.model ?? null });
 		attachAgentLog(client);
@@ -413,29 +427,6 @@ function publicProvider(p: ProviderConfig): ProviderConfig {
 app.get("/api/providers", (c) =>
 	c.json({ providers: loadProviders().map(publicProvider), defaults: { ollamaUrl: `${config.ollamaHost}/v1` } }));
 
-// Rebuild the volume models.json from the provider list so pi can discover the
-// endpoints at startup. Called after any save/delete and once at boot.
-export function syncModelsFromProviders(list: ProviderConfig[]): void {
-	const models: ModelsFile = {};
-	for (const p of list) {
-		if (!p.baseUrl || !p.model) continue;
-		models[modelsKeyFor(p, list)] = {
-			baseUrl: p.baseUrl,
-			api: p.kind === "anthropic" ? "anthropic-messages" : "openai-completions",
-			// pi hides models of a provider without a key; local servers ignore this.
-			apiKey: p.apiKey || "none",
-			models: [{ id: p.model }],
-		};
-	}
-	saveModels(models);
-}
-
-// Run once at boot so models.json reflects the current provider list even if it
-// was never saved through the API (e.g. a hand-edited providers.json).
-export function syncModelsAtBoot(): void {
-	syncModelsFromProviders(loadProviders());
-}
-
 app.post("/api/providers", async (c) => {
 	const body = await c.req.json().catch(() => ({}));
 	const action = body.action ?? "save";
@@ -604,7 +595,7 @@ function rememberHost(baseUrl: string): void {
 	if (idx >= 0) list[idx] = entry;
 	else list.unshift(entry);
 	saveHosts(list);
-	writeFileSync(config.hurlEnvPath, `host=${baseUrl}\n`);
+	writeAgentFile(config.hurlEnvPath, `host=${baseUrl}\n`);
 }
 
 app.get("/api/hosts", (c) => c.json({ hosts: loadHosts() }));
@@ -647,6 +638,8 @@ app.get("/api/info", (c) =>
 		state: config.stateDir,
 		log: logFile,
 		sessions: sessionsDir,
+		auth: authEnabled(),
+		agentIsolated: config.agent.enabled,
 	}));
 
 app.get("/health", (c) => c.json({ ok: true }));

@@ -37,7 +37,11 @@ export interface PiExit {
 export interface RpcOptions {
 	cliPath: string;
 	args?: string[];
+	/** The complete environment of the process (it is not merged with ours). */
 	env?: NodeJS.ProcessEnv;
+	/** Run pi as this user (needs a server running as root). */
+	uid?: number;
+	gid?: number;
 	/**
 	 * Node executable used to launch the pi CLI. The bundled `pi` shim ships a
 	 * `#!/usr/bin/env node` shebang, so spawning it bare relies on PATH and can
@@ -78,7 +82,8 @@ export class PiRpcClient extends EventEmitter {
 		const proc = spawn(nodeBin, [this.opts.cliPath, ...args], {
 			stdio: ["pipe", "pipe", "inherit"],
 			cwd: this.opts.cwd,
-			env: { ...process.env, ...(this.opts.env ?? {}) },
+			env: this.opts.env ?? process.env,
+			...(this.opts.uid !== undefined ? { uid: this.opts.uid, gid: this.opts.gid } : {}),
 		});
 		this.proc = proc;
 

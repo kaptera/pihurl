@@ -20,6 +20,7 @@ curl -fsS -m 5 "http://127.0.0.1:${PORT}/health" >/dev/null || { docker logs "$N
 info="$(curl -fsS -m 5 "http://127.0.0.1:${PORT}/api/info")"
 echo "$info"
 echo "$info" | grep -q '"hurl":"hurl ' || { echo "smoke: hurl is missing from the image" >&2; exit 1; }
+echo "$info" | grep -q '"agentIsolated":true' || { echo "smoke: the agent does not run as an unprivileged user" >&2; exit 1; }
 
 # the web UI and its scripts are served
 for path in / /app.js /markdown.js /grouping.js /style.css; do

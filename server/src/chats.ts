@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { mkdirAgent } from "./agent.js";
 import { config } from "./config.js";
 
 /**
@@ -38,7 +39,7 @@ const ID_RE = /^[A-Za-z0-9][\w.-]*[A-Za-z0-9]$/;
 const TITLE_MAX = 60;
 
 export function ensureSessionsDir(): void {
-	if (!existsSync(sessionsDir)) mkdirSync(sessionsDir, { recursive: true });
+	mkdirAgent(sessionsDir);
 }
 
 function sessionFile(id: string): string | undefined {

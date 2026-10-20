@@ -18,8 +18,11 @@ Everything happens in the browser, in one image.
 ```bash
 docker run -d --name pihurl \
   -p 127.0.0.1:3000:3000 \
-  -v "$PWD/work:/workspace" \
+  -v "$PWD/work:/workspace" -v pihurl-state:/state \
   --add-host=host.docker.internal:host-gateway \
+  --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETUID --cap-add SETGID \
+  --security-opt no-new-privileges:true \
+  -e PIHURL_TOKEN="$(openssl rand -hex 24)" \
   0allitter0/pihurl:latest
 ```
 
@@ -33,7 +36,9 @@ With Docker Compose, use the `docker-compose.yaml` from the repository.
 
 | | |
 |---|---|
-| `/workspace` | everything pihurl stores: specs, tests, reports, chats, logs, provider settings. Mount it. |
+| `/workspace` | the agent's project: specs, tests, reports, chat transcripts. Mount it. |
+| `/state` | provider keys, chat index, logs; readable by root only, not by the agent. Mount a volume. |
+| `PIHURL_TOKEN` | access token for the UI and API (empty = no sign-in; keep the port on `127.0.0.1`) |
 | `PORT` | port inside the container, default `3000` |
 | `OLLAMA_HOST` | where the Ollama preset points, default `http://host.docker.internal:11434` |
 
@@ -48,10 +53,10 @@ Images are built for `linux/amd64` and `linux/arm64`.
 
 ## Security
 
-pihurl has **no authentication** and its agent can run shell commands as root inside the container.
-Publish the port on `127.0.0.1` only (as above) or put an authenticating reverse proxy in front of it,
-point the target host at a test environment, and use model API keys you can revoke. Provider settings
-are stored in plain text in the `/workspace` volume.
+The agent can run shell commands, but as an unprivileged user that cannot read `/state` (provider keys,
+logs) or the server's environment; it reaches the model through a loopback proxy that adds the key.
+Set `PIHURL_TOKEN` to require a token, publish the port on `127.0.0.1` (as above) or put a TLS reverse
+proxy in front, and point the target host at a test environment. Details: the README on GitHub.
 
 ## Links
 
